@@ -9,6 +9,8 @@ from src.agents.illustrator import IllustratorAgent
 from src.database import database
 from src.model import APIModel
 from src.latex_converter import MD2LatexConverter
+from src.rag_planner import TopicRAGPlanner
+from src.image_benchmark import ImageBenchmarkAgent
 
 
 def remove_descriptions(text):
@@ -46,9 +48,9 @@ def clean_generated_survey(text):
     return cleaned_text.strip() + '\n'
 
 
-def write_outline(topic, model, section_num, outline_reference_num, db, api_key, api_url):
+def write_outline(topic, model, section_num, outline_reference_num, db, api_key, api_url, rag_context=None):
     outline_writer = outlineWriter(model=model, api_key=api_key, api_url=api_url, database=db)
-    outline = outline_writer.draft_outline(topic, outline_reference_num, 30000, section_num)
+    outline = outline_writer.draft_outline(topic, outline_reference_num, 30000, section_num, rag_context=rag_context)
     return outline, remove_descriptions(outline)
 
 
@@ -66,15 +68,19 @@ def write_subsection(
     image_api_key="",
     image_model="",
     image_api_url="",
+    rag_context=None,
+    enable_image_benchmark=True,
 ):
     illustrator = None
     if image_api_key:
         api_model = APIModel(model=model, api_key=api_key, api_url=api_url)
+        benchmark_agent = ImageBenchmarkAgent(api_model) if enable_image_benchmark else None
         illustrator = IllustratorAgent(
             api_model,
             image_api_key=image_api_key,
             image_model=image_model,
             image_api_url=image_api_url,
+            benchmark_agent=benchmark_agent,
         )
 
     subsection_writer = subsectionWriter(model=model, api_key=api_key, api_url=api_url, database=db)
@@ -87,6 +93,7 @@ def write_subsection(
             refining=True,
             saving_path=saving_path,
             illustrator_agent=illustrator,
+            rag_context=rag_context,
         )
     return subsection_writer.write(
         topic,
@@ -94,6 +101,7 @@ def write_subsection(
         subsection_len=subsection_len,
         rag_num=rag_num,
         refining=False,
+        rag_context=rag_context,
     )
 
 
@@ -108,11 +116,16 @@ def paras_args():
     parser.add_argument('--subsection_len', default=700, type=int, help='Length of each subsection')
     parser.add_argument('--outline_reference_num', default=1500, type=int, help='Number of references for outline generation')
     parser.add_argument('--rag_num', default=60, type=int, help='Number of references to use for RAG')
+    parser.add_argument('--keyword_num', default=5, type=int, help='Number of keywords for topic decomposition')
+    parser.add_argument('--candidate_per_keyword', default=12, type=int, help='Number of candidates retrieved per keyword')
+    parser.add_argument('--rag_keep_num', default=60, type=int, help='Number of references kept after candidate filtering')
+    parser.add_argument('--rag_filter_chunk_size', default=12, type=int, help='Chunk size for LLM-based candidate filtering')
     parser.add_argument('--api_url', default='https://api.openai.com/v1/chat/completions', type=str, help='url for API request')
     parser.add_argument('--api_key', default='', type=str, help='API key for the model')
     parser.add_argument('--image_api_key', default='', type=str, help='API key for the image model')
     parser.add_argument('--image_model', default='gpt-image-2-all', type=str, help='Image model to use')
     parser.add_argument('--image_api_url', default='', type=str, help='Image API endpoint; defaults based on image model')
+    parser.add_argument('--disable_image_benchmark', action='store_true', help='Disable image suitability benchmark')
     parser.add_argument('--db_path', default='./database', type=str, help='Directory of the database.')
     parser.add_argument('--embedding_model', default='nomic-ai/nomic-embed-text-v1', type=str, help='Embedding model for retrieval.')
     args = parser.parse_args()
@@ -133,6 +146,18 @@ def main(args):
 
     db = database(db_path=args.db_path, embedding_model=args.embedding_model)
 
+    rag_planner = TopicRAGPlanner(
+        model=args.model,
+        api_key=args.api_key,
+        api_url=args.api_url,
+        database=db,
+        keyword_num=args.keyword_num,
+        candidate_per_keyword=args.candidate_per_keyword,
+        keep_num=args.rag_keep_num,
+        filter_chunk_size=args.rag_filter_chunk_size,
+    )
+    rag_context = rag_planner.build(topic)
+
     if not os.path.exists(args.saving_path):
         os.makedirs(args.saving_path)
 
@@ -144,6 +169,7 @@ def main(args):
         db,
         args.api_key,
         args.api_url,
+        rag_context=rag_context,
     )
 
     raw_survey, raw_survey_with_references, raw_references, refined_survey, refined_survey_with_references, refined_references = write_subsection(
@@ -160,6 +186,8 @@ def main(args):
         image_api_key=args.image_api_key,
         image_model=args.image_model,
         image_api_url=args.image_api_url,
+        rag_context=rag_context,
+        enable_image_benchmark=not args.disable_image_benchmark,
     )
 
     refined_survey_with_references = clean_generated_survey(refined_survey_with_references)
@@ -172,11 +200,16 @@ def main(args):
     save_dic = {
         'survey': refined_survey_with_references,
         'reference': refined_references,
+        'rag_plan': rag_context.to_dict(),
     }
     with open(json_filename, 'w', encoding='utf-8') as f:
         json.dump(save_dic, f, indent=4, ensure_ascii=False)
 
-    print(f"[*] Done! Files saved to {md_filename} and {json_filename}")
+    rag_filename = f'{args.saving_path}/rag_plan.json'
+    with open(rag_filename, 'w', encoding='utf-8') as f:
+        json.dump(rag_context.to_dict(), f, indent=4, ensure_ascii=False)
+
+    print(f"[*] Done! Files saved to {md_filename}, {json_filename}, and {rag_filename}")
 
     print("[*] Converting Survey to LaTeX format...")
     latex_converter = MD2LatexConverter(md_filename)

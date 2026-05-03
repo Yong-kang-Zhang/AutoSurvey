@@ -2,17 +2,20 @@ import os
 import re
 import requests
 import base64
+
+
 class IllustratorAgent:
     """
     专业的科研绘图智能体 (The Academic Illustrator Agent)
     目标：为综述正文补充高质量机制图。
     """
-    def __init__(self, api_model, image_api_key: str, image_model: str = "gpt-image-2-all", image_api_url: str = ""):
+    def __init__(self, api_model, image_api_key: str, image_model: str = "gpt-image-2-all", image_api_url: str = "", benchmark_agent=None):
         self.api_model = api_model
         self.image_api_key = image_api_key
         self.image_model = image_model
         self.api_url = api_model._APIModel__api_url 
         self.image_api_url = image_api_url.strip() if image_api_url else self._infer_image_api_url()
+        self.benchmark_agent = benchmark_agent
 
     def _infer_image_api_url(self):
         if "image" in self.image_model and self.api_url.endswith("/v1/chat/completions"):
@@ -155,13 +158,24 @@ class IllustratorAgent:
                 
                 # 第一步：调用 Nano 生成图片
                 success = self.call_nano_api(nano_prompt, img_path)
-                
+
                 md_injection = f"\n**{caption}**\n\n"
                 if success:
                     md_injection += f"![Mechanism Diagram](./{img_fn})\n\n"
+                    if self.benchmark_agent:
+                        self.benchmark_agent.evaluate_image(
+                            image_path=img_path,
+                            topic=topic,
+                            section_name=parsed_outline['sections'][i],
+                            caption=caption,
+                            context_text="\n".join(section_contents[i]),
+                        )
 
                 section_contents[i][0] = md_injection + section_contents[i][0]
                 img_counter += 1
-                
+
+        if self.benchmark_agent:
+            self.benchmark_agent.save(saving_path)
+
         return section_contents
         

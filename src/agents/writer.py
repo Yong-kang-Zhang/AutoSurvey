@@ -18,18 +18,22 @@ class subsectionWriter():
         self.token_counter = tokenCounter()
         self.input_token_usage, self.output_token_usage = 0, 0
 
-    def write(self, topic, outline, rag_num=30, subsection_len=500, refining=True, reflection=True, saving_path="./output/", illustrator_agent=None):
+    def write(self, topic, outline, rag_num=30, subsection_len=500, refining=True, reflection=True, saving_path="./output/", illustrator_agent=None, rag_context=None):
         parsed_outline = self.parse_outline(outline=outline)
         section_content = [[] for _ in range(len(parsed_outline['sections']))]
 
         section_paper_texts = [[] for _ in range(len(parsed_outline['sections']))]
         total_ids = []
         section_references_ids = [[] for _ in range(len(parsed_outline['sections']))]
+        allowed_ids = set(getattr(rag_context, 'selected_ids', []) or [])
 
         for i in range(len(parsed_outline['sections'])):
             descriptions = parsed_outline['subsection_descriptions'][i]
             for d in descriptions:
-                references_ids = self.db.get_ids_from_query(d, num=rag_num, shuffle=False)
+                if allowed_ids:
+                    references_ids = self.db.rank_papers_by_query(d, list(allowed_ids), num=rag_num)
+                else:
+                    references_ids = self.db.get_ids_from_query(d, num=rag_num, shuffle=False)
                 total_ids += references_ids
                 section_references_ids[i].append(references_ids)
 

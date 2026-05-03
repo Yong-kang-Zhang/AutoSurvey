@@ -114,6 +114,39 @@ class database():
         vectors = self.embedding_model.encode(['search_query: ' + q for q in queries], show_progress_bar=False)
         return [self.search_index(vec, num, self.abs_loaded_index) for vec in vectors]
 
+    def rank_papers_by_query(self, query, candidate_ids, num=20):
+        if not candidate_ids:
+            return []
+
+        candidate_ids = list(dict.fromkeys([pid for pid in candidate_ids if pid in self.paper_index]))
+        if not candidate_ids:
+            return []
+
+        query_vec = self.embedding_model.encode(['search_query: ' + query], show_progress_bar=False)[0]
+        candidate_infos = self.get_paper_info_from_ids(candidate_ids)
+        candidate_texts = []
+        valid_ids = []
+        for info in candidate_infos:
+            if not info:
+                continue
+            valid_ids.append(info['id'])
+            title = info.get('title', '')
+            abs_text = info.get('abs', '')
+            candidate_texts.append(f"{title}\n{abs_text}")
+
+        if not valid_ids:
+            return []
+
+        doc_vecs = self.embedding_model.encode(
+            ['search_document: ' + text for text in candidate_texts],
+            show_progress_bar=False,
+        )
+        query_norm = np.linalg.norm(query_vec) + 1e-12
+        doc_norms = np.linalg.norm(doc_vecs, axis=1) + 1e-12
+        scores = np.dot(doc_vecs, query_vec) / (doc_norms * query_norm)
+        order = np.argsort(-scores)[:num]
+        return [valid_ids[idx] for idx in order]
+
     def search_index(self, vector, k, index):
         vector = np.array([vector]).astype('float32')
         distances, indices = index.search(vector, k)

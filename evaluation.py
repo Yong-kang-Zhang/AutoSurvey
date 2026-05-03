@@ -47,11 +47,19 @@ def evaluate(args):
 
     recall, precision = judge.citation_quality(survey, references)
 
+    image_benchmark_summary = ""
+    image_benchmark_path = os.path.join(args.saving_path, 'image_benchmark.txt')
+    if os.path.exists(image_benchmark_path):
+        with open(image_benchmark_path, 'r', encoding='utf-8') as f:
+            image_benchmark_summary = f.read().strip()
+
     with open(f'{args.saving_path}/{args.topic}_evaluation.txt', 'a+') as f:
         result = f'Judged by {args.model}:\n'
         for c, s in zip(criterion, scores):
             result += f'{c} = {s}\n'
         result += f'Citation Recall = {recall:.4f}\nCitation Precision = {precision:.4f}\n'
+        if image_benchmark_summary:
+            result += f'Image Benchmark = {image_benchmark_summary}\n'
         f.write(result)
 
 if __name__ == '__main__':

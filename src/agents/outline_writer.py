@@ -21,8 +21,12 @@ class outlineWriter():
         self.token_counter = tokenCounter()
         self.input_token_usage, self.output_token_usage = 0, 0
 
-    def draft_outline(self, topic, reference_num = 600, chunk_size = 30000, section_num = 6):
-        references_ids = self.db.get_ids_from_query(topic, num = reference_num, shuffle = True)
+    def draft_outline(self, topic, reference_num = 600, chunk_size = 30000, section_num = 6, rag_context=None):
+        references_ids = []
+        if rag_context and getattr(rag_context, 'selected_ids', None):
+            references_ids = list(rag_context.selected_ids)
+        if not references_ids:
+            references_ids = self.db.get_ids_from_query(topic, num = reference_num, shuffle = True)
         references_infos = self.db.get_paper_info_from_ids(references_ids)
 
         references_titles = [r['title'] for r in references_infos]
@@ -31,7 +35,12 @@ class outlineWriter():
 
         outlines = self.generate_rough_outlines(topic=topic, papers_chunks = abs_chunks, titles_chunks = titles_chunks, section_num=section_num)
         section_outline = self.merge_outlines(topic=topic, outlines=outlines)
-        subsection_outlines = self.generate_subsection_outlines(topic=topic, section_outline= section_outline,rag_num= 50)
+        subsection_outlines = self.generate_subsection_outlines(
+            topic=topic,
+            section_outline=section_outline,
+            rag_num=50,
+            candidate_ids=getattr(rag_context, 'selected_ids', None) if rag_context else None,
+        )
         
         merged_outline = self.process_outlines(section_outline, subsection_outlines)
         final_outline = self.edit_final_outline(merged_outline)
@@ -67,11 +76,14 @@ class outlineWriter():
         self.output_token_usage += self.token_counter.num_tokens_from_string(outline)
         return outline
     
-    def generate_subsection_outlines(self, topic, section_outline, rag_num):
+    def generate_subsection_outlines(self, topic, section_outline, rag_num, candidate_ids=None):
         survey_title, survey_sections, survey_section_descriptions = self.extract_title_sections_descriptions(section_outline)
         prompts = []
         for section_name, section_description in zip(survey_sections, survey_section_descriptions):
-            references_ids = self.db.get_ids_from_query(section_description, num=rag_num, shuffle=True)
+            if candidate_ids:
+                references_ids = self.db.rank_papers_by_query(section_description, candidate_ids, num=rag_num)
+            else:
+                references_ids = self.db.get_ids_from_query(section_description, num=rag_num, shuffle=True)
             references_infos = self.db.get_paper_info_from_ids(references_ids)
 
             references_titles = [r['title'] for r in references_infos]
