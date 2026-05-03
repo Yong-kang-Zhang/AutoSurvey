@@ -8,7 +8,7 @@ from src.model import APIModel
 from src.database import database
 from src.utils import tokenCounter
 from src.prompt import ROUGH_OUTLINE_PROMPT, MERGING_OUTLINE_PROMPT, SUBSECTION_OUTLINE_PROMPT, EDIT_FINAL_OUTLINE_PROMPT
-from transformers import AutoModel, AutoTokenizer,  AutoModelForSequenceClassification
+
 
 class outlineWriter():
     
@@ -22,7 +22,6 @@ class outlineWriter():
         self.input_token_usage, self.output_token_usage = 0, 0
 
     def draft_outline(self, topic, reference_num = 600, chunk_size = 30000, section_num = 6):
-        # Get database
         references_ids = self.db.get_ids_from_query(topic, num = reference_num, shuffle = True)
         references_infos = self.db.get_paper_info_from_ids(references_ids)
 
@@ -30,74 +29,17 @@ class outlineWriter():
         references_abs = [r['abs'] for r in references_infos]
         abs_chunks, titles_chunks = self.chunking(references_abs, references_titles, chunk_size=chunk_size)
 
-        # generate rough section-level outline
         outlines = self.generate_rough_outlines(topic=topic, papers_chunks = abs_chunks, titles_chunks = titles_chunks, section_num=section_num)
-        
-        # merge outline
         section_outline = self.merge_outlines(topic=topic, outlines=outlines)
-
-        # generate subsection-level outline
         subsection_outlines = self.generate_subsection_outlines(topic=topic, section_outline= section_outline,rag_num= 50)
         
         merged_outline = self.process_outlines(section_outline, subsection_outlines)
-        
-        # edit final outline
         final_outline = self.edit_final_outline(merged_outline)
 
         return final_outline
 
-    def without_merging(self, topic, reference_num = 600, chunk_size = 30000, section_num = 6):
-        references_ids = self.db.get_ids_from_topic(topic = topic, num = reference_num, shuffle = False)
-        references_infos = self.db.get_paper_info_from_ids(references_ids)
-
-        references_titles = [r['title'] for r in references_infos]
-        references_papers = [r['abs'] for r in references_infos]
-        papers_chunks, titles_chunks = self.chunking(references_papers, references_titles, chunk_size=chunk_size)
-
-        # generate rough section-level outline
-        section_outline = self.generate_rough_outlines(topic=topic, papers_chunks = [papers_chunks[0]], titles_chunks = [titles_chunks[0]], section_num=section_num)[0]
-        
-        # generate subsection-level outline
-        subsection_outlines = self.generate_subsection_outlines(topic=topic, section_outline= section_outline)
-        
-        final_outline = self.process_outlines(section_outline, subsection_outlines)
-
-        return final_outline, section_outline, subsection_outlines
-
-    def compute_price(self):
-        return self.token_counter.compute_price(input_tokens=self.input_token_usage, output_tokens=self.output_token_usage, model=self.model)
-
     def generate_rough_outlines(self, topic, papers_chunks, titles_chunks, section_num = 8):
-        '''
-        You wants to write a overall and comprehensive academic survey about "[TOPIC]".\n\
-        You are provided with a list of papers related to the topic below:\n\
-        ---
-        [PAPER LIST]
-        ---
-        You need to draft a outline based on the given papers.
-        The outline should contains a title and several sections.
-        Each section follows with a brief sentence to describe what to write in this section.
-        The outline is supposed to be comprehensive and contains [SECTION NUM] sections.
-
-        Return in the format:
-        <format>
-        Title: [TITLE OF THE SURVEY]
-        Section 1: [NAME OF SECTION 1]
-        Description 1: [DESCRIPTION OF SENTCTION 1]
-
-        Section 2: [NAME OF SECTION 2]
-        Description 2: [DESCRIPTION OF SENTCTION 2]
-
-        ...
-
-        Section K: [NAME OF SECTION K]
-        Description K: [DESCRIPTION OF SENTCTION K]
-        </format>
-        The outline:
-        '''
-
         prompts = []
-
         for i in trange(len(papers_chunks)):
             titles = titles_chunks[i]
             papers = papers_chunks[i]
@@ -114,31 +56,6 @@ class outlineWriter():
         return outlines
     
     def merge_outlines(self, topic, outlines):
-        '''
-        You are an expert in artificial intelligence who wants to write a overall survey about [TOPIC].\n\
-        You are provided with a list of outlines as candidates below:\n\
-        ---
-        [OUTLINE LIST]
-        ---
-        Each outline contains a title and several sections.\n\
-        Each section follows with a brief sentence to describe what to write in this section.\n\n\
-        You need to generate a final outline based on these provided outlines.\n\
-        Return in the format:
-        <format>
-        Title: [TITLE OF THE SURVEY]
-        Section 1: [NAME OF SECTION 1]
-        Description 1: [DESCRIPTION OF SENTCTION 1]
-
-        Section 2: [NAME OF SECTION 2]
-        Description 2: [DESCRIPTION OF SENTCTION 2]
-
-        ...
-
-        Section K: [NAME OF SECTION K]
-        Description K: [DESCRIPTION OF SENTCTION K]
-        </format>
-        Only return the final outline without any other informations:
-        '''
         outline_texts = '' 
         for i, o in zip(range(len(outlines)), outlines):
             outline_texts += f'---\noutline_id: {i}\n\noutline_content:\n\n{o}\n'
@@ -151,47 +68,10 @@ class outlineWriter():
         return outline
     
     def generate_subsection_outlines(self, topic, section_outline, rag_num):
-        '''
-        You are an expert in artificial intelligence who wants to write a overall survey about [TOPIC].\n\
-        You have created a overall outline below:\n\
-        ---
-        [OVERALL OUTLINE]
-        ---
-        The outline contains a title and several sections.\n\
-        Each section follows with a brief sentence to describe what to write in this section.\n\n\
-        <instruction>
-        You need to enrich the section [SECTION NAME].
-        The description of [SECTION NAME]: [SECTION DESCRIPTION]
-        You need to generate the framwork containing several subsections based on the overall outlines.\n\
-        Each subsection follows with a brief sentence to describe what to write in this subsection.
-        These papers provided for references:
-        ---
-        [PAPER LIST]
-        ---
-        Return the outline in the format:
-        <format>
-        Subsection 1: [NAME OF SUBSECTION 1]
-        Description 1: [DESCRIPTION OF SUBSENTCTION 1]
-
-        Subsection 2: [NAME OF SUBSECTION 2]
-        Description 2: [DESCRIPTION OF SUBSENTCTION 2]
-
-        ...
-
-        Subsection K: [NAME OF SUBSECTION K]
-        Description K: [DESCRIPTION OF SUBSENTCTION K]
-        </format>
-        </instruction>
-        Only return the outline without any other informations:
-        '''
-
-
         survey_title, survey_sections, survey_section_descriptions = self.extract_title_sections_descriptions(section_outline)
-
         prompts = []
-
         for section_name, section_description in zip(survey_sections, survey_section_descriptions):
-            references_ids = self.db.get_ids_from_query(section_description, num = rag_num, shuffle = True)
+            references_ids = self.db.get_ids_from_query(section_description, num=rag_num, shuffle=True)
             references_infos = self.db.get_paper_info_from_ids(references_ids)
 
             references_titles = [r['title'] for r in references_infos]
@@ -204,49 +84,11 @@ class outlineWriter():
                                                                           'SECTION DESCRIPTION':section_description,'TOPIC':topic,'PAPER LIST':paper_texts})
             prompts.append(prompt)
         self.input_token_usage += self.token_counter.num_tokens_from_list_string(prompts)
-
         sub_outlines = self.api_model.batch_chat(prompts, temperature=1)
-
         self.output_token_usage += self.token_counter.num_tokens_from_list_string(sub_outlines)
         return sub_outlines
 
     def edit_final_outline(self, outline):
-        '''
-        You are an expert in artificial intelligence who wants to write a overall survey about [TOPIC].\n\
-        You have created a draft outline below:\n\
-        ---
-        [OVERALL OUTLINE]
-        ---
-        The outline contains a title and several sections.\n\
-        Each section follows with a brief sentence to describe what to write in this section.\n\n\
-        Under each section, there are several subsections.
-        Each subsection also follows with a brief sentence of descripition.
-        You need to modify the outline to make it both comprehensive and coherent with no repeated subsections.
-        Return the final outline in the format:
-        <format>
-        # [TITLE OF SURVEY]
-
-        ## [NAME OF SECTION 1]
-
-        ### [NAME OF SUBSECTION 1]
-
-        ### [NAME OF SUBSECTION 2]
-
-        ...
-
-        ### [NAME OF SUBSECTION L]
-        
-        ## [NAME OF SECTION 2]
-
-        ...
-
-        ## [NAME OF SECTION K]
-
-        ...
-        </format>
-        Only return the final outline without any other informations:
-        '''
-
         prompt = self.__generate_prompt(EDIT_FINAL_OUTLINE_PROMPT, paras={'OVERALL OUTLINE': outline})
         self.input_token_usage += self.token_counter.num_tokens_from_string(prompt)
         outline = self.api_model.chat(prompt, temperature=1)
@@ -279,6 +121,8 @@ class outlineWriter():
     def chunking(self, papers, titles, chunk_size = 14000):
         paper_chunks, title_chunks = [], []
         total_length = self.token_counter.num_tokens_from_list_string(papers)
+        if total_length == 0:
+            return [papers], [titles]
         num_of_chunks = int(total_length / chunk_size) + 1
         avg_len = int(total_length / num_of_chunks) + 1
         split_points = []
@@ -310,4 +154,3 @@ class outlineWriter():
                 subsection = subsections[j]
                 res += f'### {i+1}.{j+1} {subsection}\nDescription: {subsection_descriptions[j]}\n\n'
         return res
-
