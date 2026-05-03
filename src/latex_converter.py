@@ -129,6 +129,11 @@ class MD2LatexConverter:
             text = text.replace(src, dst)
         return text
 
+    def _escape_currency_dollars(self, text):
+        # Preserve real inline math as much as possible, but escape prose currency
+        # markers such as "$100K" that otherwise break LaTeX compilation.
+        return re.sub(r'(?<!\\)\$(?=\d)', r'\\$', text)
+
     def _protect_blocks(self, text):
         blocks = []
 
@@ -233,10 +238,12 @@ class MD2LatexConverter:
         tex_text = self._normalize_unicode(tex_text)
 
         tex_text, blocks = self._protect_blocks(tex_text)
+        tex_text = self._escape_currency_dollars(tex_text)
         tex_text = re.sub(r'(?<!\\)&', r'\\&', tex_text)
         tex_text = re.sub(r'(?<!\\)%', r'\\%', tex_text)
         tex_text = re.sub(r'(?<!\\)_', r'\\_', tex_text)
         tex_text = re.sub(r'(?<!\\)#', r'\\#', tex_text)
+        tex_text = re.sub(r'(?<!\\)\^', r'\\^{}', tex_text)
         tex_text = self._restore_blocks(tex_text, blocks)
         tex_text = re.sub(r'\n{3,}', '\n\n', tex_text)
 
