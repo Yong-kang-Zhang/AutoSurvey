@@ -3,10 +3,18 @@ import re
 import threading
 import time
 import copy
+from collections import Counter
 
 from src.model import APIModel
 from src.utils import tokenCounter
-from src.prompt import SUBSECTION_WRITING_PROMPT, LCE_PROMPT, CHECK_CITATION_PROMPT, CITATION_ENRICH_PROMPT
+from src.prompt import (
+    SUBSECTION_WRITING_PROMPT,
+    LCE_PROMPT,
+    CHECK_CITATION_PROMPT,
+    CITATION_ENRICH_PROMPT,
+    CITATION_REBALANCE_PROMPT,
+    GLOBAL_CITATION_EXPANSION_PROMPT,
+)
 
 
 class subsectionWriter():
@@ -27,9 +35,9 @@ class subsectionWriter():
             total_subsections = max(1, len(subsection_descriptions))
             target_unique_budget = min(
                 len(candidate_pool),
-                max(math.ceil(rag_num * total_subsections * 1.45), rag_num + 140),
+                max(math.ceil(rag_num * total_subsections * 1.7), rag_num + 180),
             )
-            per_subsection_budget = max(rag_num + 6, math.ceil(target_unique_budget / total_subsections))
+            per_subsection_budget = max(rag_num + 12, math.ceil(target_unique_budget / total_subsections) + 6)
         else:
             per_subsection_budget = rag_num
 
@@ -52,9 +60,9 @@ class subsectionWriter():
                     remaining_ids = [pid for pid in ranked_ids if pid not in chosen_ids]
                     for pid in remaining_ids:
                         chosen_ids.append(pid)
-                        if len(chosen_ids) >= max(per_subsection_budget + 4, rag_num + 4):
+                        if len(chosen_ids) >= max(per_subsection_budget + 10, rag_num + 12):
                             break
-                chosen_ids = chosen_ids[:max(per_subsection_budget + 4, rag_num + 4)]
+                chosen_ids = chosen_ids[:max(per_subsection_budget + 10, rag_num + 12)]
             else:
                 chosen_ids = self.db.get_ids_from_query(description, num=per_subsection_budget, shuffle=False)
 
@@ -137,6 +145,24 @@ class subsectionWriter():
         if refining:
             final_section_content = self.refine_subsections(topic, outline, section_content)
             final_section_content = self.strip_uncontrolled_tables_from_sections(final_section_content)
+            final_section_content = self.rebalance_citations_after_refinement(
+                topic,
+                parsed_outline,
+                final_section_content,
+                section_references_ids,
+                temp_title_dic,
+                temp_abs_dic,
+                section_citation_targets,
+                section_unique_paper_targets,
+            )
+            final_section_content = self.expand_global_citation_coverage(
+                topic,
+                parsed_outline,
+                final_section_content,
+                section_references_ids,
+                temp_title_dic,
+                temp_abs_dic,
+            )
             final_section_content = self.insert_section_tables(
                 topic,
                 parsed_outline,
@@ -427,15 +453,15 @@ or
             word_num = int(subsection_len)
         except Exception:
             word_num = 500
-        soft_target = max(8, round(word_num / 48))
+        soft_target = max(10, round(word_num / 42))
         if available_papers > 0:
-            soft_target = min(soft_target, max(8, math.ceil(available_papers * 0.72)))
+            soft_target = min(soft_target, max(10, math.ceil(available_papers * 0.8)))
         return soft_target
 
     def estimate_unique_paper_target(self, available_papers, citation_target):
         if available_papers <= 0:
             return 0
-        return min(available_papers, max(10, min(citation_target + 5, math.ceil(available_papers * 0.62))))
+        return min(available_papers, max(12, min(citation_target + 8, math.ceil(available_papers * 0.72))))
 
     def write_subsection_with_reflection(self, paper_texts_l, topic, outline, section, subsections, subdescriptions, res_l, idx, rag_num=20, subsection_len=1000, citation_targets=None, unique_paper_targets=None):
         prompts = []
@@ -477,9 +503,9 @@ or
             citation_target = 6
             unique_paper_target = 8
             if citation_targets and j < len(citation_targets):
-                citation_target = citation_targets[j] + 3
+                citation_target = citation_targets[j] + 5
             if unique_paper_targets and j < len(unique_paper_targets):
-                unique_paper_target = unique_paper_targets[j]
+                unique_paper_target = unique_paper_targets[j] + 3
             enrich_prompts.append(
                 self.__generate_prompt(
                     CITATION_ENRICH_PROMPT,
@@ -488,7 +514,7 @@ or
                         'TOPIC': topic,
                         'PAPER LIST': paper_texts,
                         'CITATION NUM': str(citation_target),
-                        'UNIQUE CITATION NUM': str(unique_paper_target + 1),
+                        'UNIQUE CITATION NUM': str(unique_paper_target + 2),
                     },
                 )
             )
@@ -518,6 +544,219 @@ or
 
         res_l[idx] = contents
         return contents
+
+    def flatten_unique_ids(self, nested_ids):
+        merged = []
+        for ids in nested_ids:
+            for pid in ids:
+                if pid not in merged:
+                    merged.append(pid)
+        return merged
+
+    def collect_citation_titles(self, text):
+        counts = Counter()
+        for match in re.finditer(r'\[([^\]]+)\]', text or ''):
+            bracket = match.group(1).strip()
+            if not bracket or re.fullmatch(r'[\d\s;,]+', bracket):
+                continue
+            for title in bracket.split(';'):
+                cleaned = title.strip()
+                if cleaned and cleaned != 'Mechanism Diagram':
+                    counts[cleaned] += 1
+        return counts
+
+    def build_paper_text(self, reference_ids, title_map, abs_map, max_papers=None, max_abs_chars=900):
+        paper_texts = []
+        dedup_ids = []
+        for pid in reference_ids:
+            if pid in title_map and pid in abs_map and pid not in dedup_ids:
+                dedup_ids.append(pid)
+        if max_papers is not None:
+            dedup_ids = dedup_ids[:max_papers]
+
+        for pid in dedup_ids:
+            title = title_map[pid]
+            abs_text = (abs_map[pid] or '')[:max_abs_chars]
+            paper_texts.append(
+                f"---\n\npaper_title: {title}\n\npaper_content:\n\n{abs_text}\n"
+            )
+        if not paper_texts:
+            return "---\n"
+        return "".join(paper_texts) + "---\n"
+
+    def select_rebalance_reference_ids(self, description, local_ids, section_ids, max_refs=68):
+        local_ids = [pid for pid in local_ids if pid]
+        section_ids = [pid for pid in section_ids if pid]
+        if not section_ids:
+            return local_ids[:max_refs]
+
+        ranked_ids = self.db.rank_papers_by_query(
+            description,
+            section_ids,
+            num=min(len(section_ids), max(max_refs * 3, len(local_ids) * 4, 96)),
+        )
+        expanded_ids = list(local_ids)
+        for pid in ranked_ids:
+            if pid not in expanded_ids:
+                expanded_ids.append(pid)
+            if len(expanded_ids) >= max_refs:
+                break
+        return expanded_ids[:max_refs]
+
+    def rebalance_citations_after_refinement(
+        self,
+        topic,
+        parsed_outline,
+        section_content,
+        section_references_ids,
+        title_map,
+        abs_map,
+        section_citation_targets,
+        section_unique_paper_targets,
+    ):
+        prompts = []
+        prompt_meta = []
+        validation_prompts = []
+
+        for i, section_name in enumerate(parsed_outline['sections']):
+            section_ids = self.flatten_unique_ids(section_references_ids[i])
+            subsection_titles = parsed_outline['subsections'][i]
+            subsection_descriptions = parsed_outline['subsection_descriptions'][i]
+            for j, subsection_text in enumerate(section_content[i]):
+                description = subsection_descriptions[j] if j < len(subsection_descriptions) else subsection_titles[j]
+                local_ids = section_references_ids[i][j]
+                rebalance_ids = self.select_rebalance_reference_ids(
+                    f"{section_name}. {subsection_titles[j]}. {description}",
+                    local_ids,
+                    section_ids,
+                    max_refs=max(58, min(82, len(section_ids))),
+                )
+                paper_text = self.build_paper_text(rebalance_ids, title_map, abs_map, max_papers=72)
+                overused_titles = self.collect_citation_titles(subsection_text)
+                overused = [
+                    f"{title} ({count} times)"
+                    for title, count in overused_titles.most_common(8)
+                    if count >= 3
+                ]
+                if not overused:
+                    overused = ["None detected; still diversify where valid."]
+
+                citation_target = section_citation_targets[i][j] if j < len(section_citation_targets[i]) else 10
+                unique_target = section_unique_paper_targets[i][j] if j < len(section_unique_paper_targets[i]) else 12
+                prompt = self.__generate_prompt(
+                    CITATION_REBALANCE_PROMPT,
+                    paras={
+                        'TOPIC': topic,
+                        'PAPER LIST': paper_text,
+                        'SUBSECTION': subsection_text,
+                        'DESCRIPTION': description,
+                        'OVERUSED TITLES': "\n".join(overused),
+                        'CITATION NUM': str(citation_target + 4),
+                        'UNIQUE CITATION NUM': str(unique_target + 4),
+                    },
+                )
+                prompts.append(prompt)
+                prompt_meta.append((i, j, paper_text))
+
+        if not prompts:
+            return section_content
+
+        self.input_token_usage += self.token_counter.num_tokens_from_list_string(prompts)
+        revised_contents = self.api_model.batch_chat(prompts, temperature=0.25)
+        self.output_token_usage += self.token_counter.num_tokens_from_list_string(revised_contents)
+        cleaned_contents = [
+            self.remove_markdown_tables(c.replace('<format>', '').replace('</format>', ''))
+            for c in revised_contents
+        ]
+
+        for (i, j, paper_text), content in zip(prompt_meta, cleaned_contents):
+            validation_prompts.append(
+                self.__generate_prompt(
+                    CHECK_CITATION_PROMPT,
+                    paras={'SUBSECTION': content, 'TOPIC': topic, 'PAPER LIST': paper_text},
+                )
+            )
+
+        self.input_token_usage += self.token_counter.num_tokens_from_list_string(validation_prompts)
+        validated_contents = self.api_model.batch_chat(validation_prompts, temperature=0.6)
+        self.output_token_usage += self.token_counter.num_tokens_from_list_string(validated_contents)
+        validated_contents = [
+            self.remove_markdown_tables(c.replace('<format>', '').replace('</format>', ''))
+            for c in validated_contents
+        ]
+
+        for (i, j, _), content in zip(prompt_meta, validated_contents):
+            section_content[i][j] = content
+        return section_content
+
+    def expand_global_citation_coverage(
+        self,
+        topic,
+        parsed_outline,
+        section_content,
+        section_references_ids,
+        title_map,
+        abs_map,
+    ):
+        prompts = []
+        prompt_meta = []
+        validation_prompts = []
+
+        for i, section_name in enumerate(parsed_outline['sections']):
+            section_ids = self.flatten_unique_ids(section_references_ids[i])
+            subsection_titles = parsed_outline['subsections'][i]
+            subsection_descriptions = parsed_outline['subsection_descriptions'][i]
+            for j, subsection_text in enumerate(section_content[i]):
+                description = subsection_descriptions[j] if j < len(subsection_descriptions) else subsection_titles[j]
+                expanded_ids = self.select_rebalance_reference_ids(
+                    f"{topic}. {section_name}. {subsection_titles[j]}. {description}",
+                    section_references_ids[i][j],
+                    section_ids,
+                    max_refs=max(72, min(110, len(section_ids))),
+                )
+                paper_text = self.build_paper_text(expanded_ids, title_map, abs_map, max_papers=96, max_abs_chars=1000)
+                prompt = self.__generate_prompt(
+                    GLOBAL_CITATION_EXPANSION_PROMPT,
+                    paras={
+                        'TOPIC': topic,
+                        'PAPER LIST': paper_text,
+                        'SUBSECTION': subsection_text,
+                        'DESCRIPTION': description,
+                    },
+                )
+                prompts.append(prompt)
+                prompt_meta.append((i, j, paper_text))
+
+        if not prompts:
+            return section_content
+
+        self.input_token_usage += self.token_counter.num_tokens_from_list_string(prompts)
+        revised_contents = self.api_model.batch_chat(prompts, temperature=0.2)
+        self.output_token_usage += self.token_counter.num_tokens_from_list_string(revised_contents)
+        cleaned_contents = [
+            self.remove_markdown_tables(c.replace('<format>', '').replace('</format>', ''))
+            for c in revised_contents
+        ]
+
+        for (i, j, paper_text), content in zip(prompt_meta, cleaned_contents):
+            validation_prompts.append(
+                self.__generate_prompt(
+                    CHECK_CITATION_PROMPT,
+                    paras={'SUBSECTION': content, 'TOPIC': topic, 'PAPER LIST': paper_text},
+                )
+            )
+
+        self.input_token_usage += self.token_counter.num_tokens_from_list_string(validation_prompts)
+        validated_contents = self.api_model.batch_chat(validation_prompts, temperature=0.55)
+        self.output_token_usage += self.token_counter.num_tokens_from_list_string(validated_contents)
+        validated_contents = [
+            self.remove_markdown_tables(c.replace('<format>', '').replace('</format>', ''))
+            for c in validated_contents
+        ]
+
+        for (i, j, _), content in zip(prompt_meta, validated_contents):
+            section_content[i][j] = content
+        return section_content
 
     def __generate_prompt(self, template, paras):
         prompt = template
@@ -570,10 +809,25 @@ or
         return result
 
     def process_references(self, survey):
+        survey = self.unwrap_markdown_fences(survey)
         protected_survey, placeholders = self.protect_non_citation_blocks(survey)
         citations = self.extract_citations(protected_survey)
         updated_text, references = self.replace_citations_with_numbers(citations, protected_survey)
         return self.restore_non_citation_blocks(updated_text, placeholders), references
+
+    def unwrap_markdown_fences(self, text):
+        if not text:
+            return text
+
+        def repl(match):
+            content = match.group(1).strip('\n')
+            if any(token in content for token in ('## ', '### ', '|', '![')):
+                return match.group(0)
+            return content
+
+        text = re.sub(r'```markdown\s*\n(.*?)\n```', repl, text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'```\s*\n(.*?)\n```', repl, text, flags=re.DOTALL)
+        return text
 
     def strip_internal_headings(self, text):
         cleaned_lines = []
@@ -597,7 +851,7 @@ or
         return "\n".join(document)
 
     def extract_citations(self, markdown_text):
-        pattern = re.compile(r'\[(.*?)\]')
+        pattern = re.compile(r'\[(.*?)\]', re.DOTALL)
         matches = pattern.findall(markdown_text)
         citations = []
         for match in matches:
@@ -646,13 +900,25 @@ or
             numbered_citations = []
             for citation in individual_citations:
                 citation = citation.strip()
-                if citation in citation_to_ids:
-                    citation_id = citation_to_ids[citation]
+                if not citation:
+                    continue
+
+                citation_id = citation_to_ids.get(citation)
+                if citation_id is None:
+                    normalized_citation = re.sub(r'\s+', ' ', citation.replace('\n', ' ')).strip()
+                    citation_id = citation_to_ids.get(normalized_citation)
+                if citation_id is None:
+                    for known_citation, known_id in citation_to_ids.items():
+                        normalized_known = re.sub(r'\s+', ' ', known_citation.replace('\n', ' ')).strip()
+                        if normalized_known == re.sub(r'\s+', ' ', citation.replace('\n', ' ')).strip():
+                            citation_id = known_id
+                            break
+                if citation_id is not None:
                     if citation_id in ids_to_titles:
                         numbered_citations.append(str(title_to_number[ids_to_titles[citation_id]]))
             return '[' + '; '.join(numbered_citations) + ']' if numbered_citations else match.group(0)
 
-        updated_text = re.sub(r'\[(.*?)\]', replace_match, markdown_text)
+        updated_text = re.sub(r'\[(.*?)\]', replace_match, markdown_text, flags=re.DOTALL)
         references_section = "\n\n## References\n\n"
 
         references = {num: titles_to_ids[title] for num, title in number_to_title_sorted.items()}

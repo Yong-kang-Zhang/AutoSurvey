@@ -111,9 +111,28 @@ class database():
     def _normalize_title(self, title):
         title = str(title or "").lower().strip()
         title = title.replace("&", " and ")
+        title = re.sub(r'[\'"`“”‘’]', '', title)
+        title = title.replace('$', ' ')
+        title = title.replace('\\', ' ')
         title = re.sub(r'[\-_:;,./()\[\]{}]+', ' ', title)
         title = re.sub(r'\s+', ' ', title)
         return title.strip()
+
+    def _resolve_short_title_alias(self, normalized_title):
+        if not normalized_title:
+            return None
+        token_num = len(normalized_title.split())
+        if token_num == 0 or token_num > 5:
+            return None
+
+        prefix = normalized_title + ' '
+        matched_id = None
+        for title, pid in self.normalized_title_to_id.items():
+            if title == normalized_title or title.startswith(prefix):
+                if matched_id is not None:
+                    return None
+                matched_id = pid
+        return matched_id
 
     # === 核心检索功能 ===
     def get_ids_from_query(self, query, num, shuffle=False):
@@ -190,21 +209,38 @@ class database():
             norm_title = self._normalize_title(citation)
             if norm_title in self.normalized_title_to_id:
                 flat_ids[idx] = self.normalized_title_to_id[norm_title]
+                continue
+
+            alias_id = self._resolve_short_title_alias(norm_title)
+            if alias_id:
+                flat_ids[idx] = alias_id
             else:
                 unresolved_indices.append(idx)
                 unresolved_citations.append(citation)
 
         if unresolved_citations:
-            q = self.get_embeddings_documents(unresolved_citations)
-            batch_results = self.batch_search(q, 1, title=True)
-            for idx, res in zip(unresolved_indices, batch_results):
+            q = self.get_embeddings_queries(unresolved_citations)
+            batch_results = self.batch_search(q, 3, title=True)
+            for idx, citation, res in zip(unresolved_indices, unresolved_citations, batch_results):
                 if res:
-                    flat_ids[idx] = res[0]
+                    citation_norm = self._normalize_title(citation)
+                    chosen = None
+                    for pid in res:
+                        title = self.paper_index.get(pid, {}).get('title', '')
+                        title_norm = self._normalize_title(title)
+                        if title_norm == citation_norm or title_norm.startswith(citation_norm + ' '):
+                            chosen = pid
+                            break
+                    flat_ids[idx] = chosen or res[0]
         return flat_ids
 
     def get_embeddings_documents(self, batch_text):
         # 对应 model.encode
         batch_text = ['search_document: ' + _ for _ in batch_text]
+        return self.embedding_model.encode(batch_text, show_progress_bar=False)
+
+    def get_embeddings_queries(self, batch_text):
+        batch_text = ['search_query: ' + _ for _ in batch_text]
         return self.embedding_model.encode(batch_text, show_progress_bar=False)
 
     # === 数据获取 ===

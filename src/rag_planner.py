@@ -42,9 +42,9 @@ class TopicRAGPlanner:
         if self.keep_num and self.keep_num > 0:
             return min(self.keep_num, len(candidate_ids)) if candidate_ids else self.keep_num
         if not candidate_ids:
-            return max(180, self.keyword_num * 18)
-        auto_keep = max(180, int(len(candidate_ids) * 0.78))
-        auto_keep = max(auto_keep, self.keyword_num * 18)
+            return max(240, self.keyword_num * 22)
+        auto_keep = max(240, int(len(candidate_ids) * 0.84))
+        auto_keep = max(auto_keep, self.keyword_num * 22)
         return min(len(candidate_ids), auto_keep)
 
     def _generate_prompt(self, template, paras):
@@ -81,6 +81,7 @@ class TopicRAGPlanner:
         return items
 
     def generate_keywords(self, topic):
+        format_items = ", ".join([f'"keyword{i + 1}"' for i in range(self.keyword_num)])
         prompt = f"""
 You are preparing a literature retrieval plan for an academic survey.
 Topic: {topic}
@@ -89,10 +90,11 @@ Task:
 1. Propose {self.keyword_num} concise search keywords or subtopics.
 2. Each keyword should be short, specific, and useful for retrieval.
 3. Avoid duplicates and overly broad wording.
-4. Cover different literature axes when possible, such as core methods, architectures, training or inference strategies, evaluation settings, applications, and limitations.
+4. Cover different literature axes when possible, such as core methods, architectures, training or inference strategies, evaluation settings, applications, limitations, and specialized subproblems.
+5. Prefer keywords that expand the literature pool rather than restating the same phrasing.
 
 Return strict JSON only in the form:
-["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"]
+[{format_items}]
 """
         response = self.api_model.chat(prompt, temperature=0.2)
         keywords = self._parse_json_list(response)
@@ -139,7 +141,7 @@ Keywords: {", ".join(keywords)}
 
 Select the most relevant papers from the candidate list below.
 Keep papers that are central, complementary, and useful for building the survey.
-Prefer a balanced pool covering seminal works, representative methods, strong empirical studies, benchmarks, applications, and challenge-oriented papers when they are relevant to the topic.
+Prefer a balanced pool covering seminal works, representative methods, strong empirical studies, benchmarks, applications, challenge-oriented papers, and specialized evaluation or domain papers when they are relevant to the topic.
 Avoid weakly related, duplicate, or tangential papers.
 Return strict JSON only:
 {{"selected_ids": ["id1", "id2"]}}

@@ -282,6 +282,68 @@ Task:
 7. Only cite paper_title values from the provided paper list.
 8. Do not add markdown tables, bullet lists, or new headings.
 9. If the current subsection overuses the same few papers while other relevant papers in the provided pool support nearby claims, diversify the citations.
+10. Reduce concentration on any single paper title when multiple valid alternatives exist. A survey subsection should not repeatedly rely on the same flagship paper for unrelated claims.
+
+Return only the revised subsection text.
+'''
+
+
+CITATION_REBALANCE_PROMPT = '''
+You are revising one survey subsection about [TOPIC].
+You are only allowed to use the papers listed below for citations:
+---
+[PAPER LIST]
+---
+
+Current subsection:
+---
+[SUBSECTION]
+---
+
+Subsection focus:
+[DESCRIPTION]
+
+Current citation overuse signals:
+[OVERUSED TITLES]
+
+Task:
+1. Preserve the prose, structure, and technical meaning of the subsection. Edit citations only, except for minimal local wording needed to attach a citation naturally.
+2. Increase citation breadth where the evidence supports it. Aim for at least [CITATION NUM] citation spans and at least [UNIQUE CITATION NUM] distinct paper titles across the subsection.
+3. If a paper title is reused many times for loosely related claims, replace some of those repeated citations with other valid supporting papers from the provided pool.
+4. Prefer representative citation brackets that mix seminal and recent papers when that better matches the claim.
+5. For benchmark, application, robustness, privacy, calibration, or evaluation claims, favor papers that are specifically about that claim instead of repeatedly citing broad generic papers.
+6. Keep correct existing citations when they are already well matched.
+7. Remove unsupported citations. Only cite paper_title values from the provided paper list.
+8. Do not add markdown tables, bullet lists, new headings, figure captions, or image markdown.
+
+Return only the revised subsection text.
+'''
+
+
+GLOBAL_CITATION_EXPANSION_PROMPT = '''
+You are revising one survey subsection about [TOPIC] to improve literature coverage.
+You are only allowed to use the papers listed below for citations:
+---
+[PAPER LIST]
+---
+
+Current subsection:
+---
+[SUBSECTION]
+---
+
+Subsection focus:
+[DESCRIPTION]
+
+Task:
+1. Preserve the prose, logic, and technical meaning of the subsection.
+2. Add or replace citations so the subsection draws on a broader set of relevant papers from the provided pool.
+3. Prioritize claims about benchmarks, applications, robustness, calibration, privacy, retrieval, multimodality, and domain adaptation for citation expansion, because these claims usually admit multiple valid supporting papers.
+4. Prefer 2-3 representative papers in a bracket when a claim reflects a trend, comparison, or method family.
+5. Reduce repeated reuse of the same paper across unrelated claims when other valid papers from the pool support those claims.
+6. Keep citations accurate. Remove unsupported citations rather than forcing them.
+7. Only edit citations and very small local wording needed to attach them naturally.
+8. Do not add tables, bullet lists, headings, code fences, or image markdown.
 
 Return only the revised subsection text.
 '''
