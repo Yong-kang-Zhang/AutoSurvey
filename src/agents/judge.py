@@ -2,7 +2,6 @@ import os
 import numpy as np
 import tiktoken
 import re
-import json
 from tqdm import trange,tqdm
 import time
 import threading
@@ -50,7 +49,7 @@ class Judge():
         for k in paras.keys():
             prompt = prompt.replace(f'[{k}]', paras[k])
         return prompt
-    
+
     def criteria_based_judging(self, survey, topic, criterion):
         '''
         Here is an academic survey about the topic "[TOPIC]":
@@ -92,10 +91,13 @@ class Judge():
         return scores
     
     def extract_num(self, string):
-        numbers = re.findall(r'\d+', string)
+        numbers = re.findall(r'\d+(?:\.\d+)?', string)
         if len(numbers) == 0:
             return ''
-        return eval(numbers[0])
+        try:
+            return float(numbers[0])
+        except Exception:
+            return ''
 
     def batch_criteria_based_judging(self, survey, topic, criteria):
         '''

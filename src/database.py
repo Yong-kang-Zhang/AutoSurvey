@@ -2,6 +2,7 @@ import os
 import json
 import numpy as np
 import torch
+import re
 from sentence_transformers import SentenceTransformer
 import h5py
 from src.utils import tokenCounter
@@ -35,6 +36,7 @@ class database():
         # 3. 加载 JSON 数据库
         print(f"    > Loading JSON Database...")
         self.paper_index = {}
+        self.normalized_title_to_id = {}
         json_path = f'{db_path}/arxiv_paper_db.json'
         
         if os.path.exists(json_path):
@@ -45,6 +47,9 @@ class database():
                     for k, v in data.items():
                         if isinstance(v, dict) and 'id' in v:
                             self.paper_index[v['id']] = v
+                            norm_title = self._normalize_title(v.get('title', ''))
+                            if norm_title and norm_title not in self.normalized_title_to_id:
+                                self.normalized_title_to_id[norm_title] = v['id']
                 print(f"    > Loaded {len(self.paper_index)} papers.")
             except Exception as e:
                 print(f"    [Error] JSON corrupted: {e}")
@@ -102,6 +107,13 @@ class database():
         with open(f'{db_path}/arxivid_to_index_abs.json','r') as f:
             mapping = json.load(f)
         return {k: int(v) for k, v in mapping.items()}, {int(v): k for k, v in mapping.items()}
+
+    def _normalize_title(self, title):
+        title = str(title or "").lower().strip()
+        title = title.replace("&", " and ")
+        title = re.sub(r'[\-_:;,./()\[\]{}]+', ' ', title)
+        title = re.sub(r'\s+', ' ', title)
+        return title.strip()
 
     # === 核心检索功能 ===
     def get_ids_from_query(self, query, num, shuffle=False):
@@ -167,18 +179,27 @@ class database():
 
     # === [关键修复] 恢复 citation 搜索功能 ===
     def get_titles_from_citations(self, citations):
-        if not self.has_faiss: return [""] * len(citations)
-        # 1. 编码引用标题
-        q = self.get_embeddings_documents(citations)
-        # 2. 在 Title 索引中搜索
-        batch_results = self.batch_search(q, 1, title=True)
-        # 3. 展平结果，处理空值
-        flat_ids = []
-        for res in batch_results:
-            if res:
-                flat_ids.append(res[0])
+        if not self.has_faiss:
+            return [""] * len(citations)
+
+        flat_ids = ["Unknown"] * len(citations)
+        unresolved_indices = []
+        unresolved_citations = []
+
+        for idx, citation in enumerate(citations):
+            norm_title = self._normalize_title(citation)
+            if norm_title in self.normalized_title_to_id:
+                flat_ids[idx] = self.normalized_title_to_id[norm_title]
             else:
-                flat_ids.append("Unknown") # 占位，保持列表长度一致
+                unresolved_indices.append(idx)
+                unresolved_citations.append(citation)
+
+        if unresolved_citations:
+            q = self.get_embeddings_documents(unresolved_citations)
+            batch_results = self.batch_search(q, 1, title=True)
+            for idx, res in zip(unresolved_indices, batch_results):
+                if res:
+                    flat_ids[idx] = res[0]
         return flat_ids
 
     def get_embeddings_documents(self, batch_text):

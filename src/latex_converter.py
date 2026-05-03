@@ -21,22 +21,31 @@ class MD2LatexConverter:
         if len(lines) < 3: 
             return table_text
         cols = len([c for c in lines[0].split('|') if c.strip()])
-        col_format = "c" * cols
+        col_format = "@{}" + "".join([">{\\raggedright\\arraybackslash}X" for _ in range(cols)]) + "@{}"
         latex_tb = [
-            "\\begin{table}[H]", "\\centering", f"\\begin{{tabular}}{{{col_format}}}", "\\toprule"
+            "\\begin{table}[H]",
+            "\\centering",
+            "\\small",
+            "\\setlength{\\tabcolsep}{4pt}",
+            f"\\begin{{tabularx}}{{\\textwidth}}{{{col_format}}}",
+            "\\toprule"
         ]
         for line in lines:
-            if '---' in line:
+            stripped = line.strip()
+            sep_cells = [c.strip() for c in stripped.strip('|').split('|')]
+            if sep_cells and all(re.fullmatch(r':?-{3,}:?', cell or '') for cell in sep_cells):
                 latex_tb.append("\\midrule")
                 continue
             cells = [c.strip() for c in line.split('|')]
             if line.strip().startswith('|'): cells = cells[1:]
             if line.strip().endswith('|'): cells = cells[:-1]
-            cells = [c.replace('%', '\\%').replace('&', '\\&').replace('_', '\\_') for c in cells]
-            row_str = " & ".join(cells) + " \\\\"
+            cells = [c.replace('%', '\\%').replace('&', '\\&').replace('_', '\\_').replace('#', '\\#') for c in cells]
+            if cells and cells[0].startswith('['):
+                cells[0] = '{}' + cells[0]
+            row_str = " & ".join(cells) + " \\tabularnewline"
             latex_tb.append(row_str)
         latex_tb.append("\\bottomrule")
-        latex_tb.append("\\end{tabular}")
+        latex_tb.append("\\end{tabularx}")
         latex_tb.append("\\end{table}\n")
         return "\n".join(latex_tb) + "\n"
 
@@ -168,17 +177,27 @@ class MD2LatexConverter:
         md_text = self._sanitize_markdown(md_text)
         tex_text = re.sub(r'```mermaid\n.*?\n```', '', md_text, flags=re.DOTALL | re.IGNORECASE)
 
-        def image_repl(match):
-            caption = match.group(1)
-            img_rel_path = match.group(2)
+        def build_figure_block(caption, img_rel_path):
             img_name = os.path.basename(img_rel_path)
             old_img_path = os.path.join(self.base_dir, img_name)
             new_img_path = os.path.join(self.fig_dir, img_name)
             if os.path.exists(old_img_path):
                 shutil.move(old_img_path, new_img_path)
-            return (f"\\begin{{figure}}[H]\n\\centering\n\\includegraphics[width=0.8\\textwidth]{{fig/{img_name}}}\n"
+            caption = caption.replace('\n', ' ').strip()
+            return (f"\\begin{{figure}}[H]\n\\centering\n\\includegraphics[width=0.96\\textwidth,height=0.78\\textheight,keepaspectratio]{{fig/{img_name}}}\n"
                     f"\\caption{{{caption}}}\n\\end{{figure}}\n")
 
+        def bold_caption_image_repl(match):
+            caption = match.group(1)
+            img_rel_path = match.group(3)
+            return build_figure_block(caption, img_rel_path)
+
+        def image_repl(match):
+            caption = match.group(1)
+            img_rel_path = match.group(2)
+            return build_figure_block(caption, img_rel_path)
+
+        tex_text = re.sub(r'\*\*(.*?)\*\*\s*\n\s*!\[(.*?)\]\((.*?)\)', bold_caption_image_repl, tex_text, flags=re.DOTALL)
         tex_text = re.sub(r'!\[(.*?)\]\((.*?)\)', image_repl, tex_text)
         tex_text = re.sub(r'(^\|.*\|\s*\n)+', self.convert_tables, tex_text, flags=re.MULTILINE)
         tex_text = re.sub(r'^# (.*?)$', r'\\title{\1}\n\\maketitle\n', tex_text, flags=re.MULTILINE)
@@ -204,6 +223,8 @@ class MD2LatexConverter:
 \\usepackage{{geometry}}
 \\usepackage[hidelinks]{{hyperref}}
 \\usepackage{{booktabs}}
+\\usepackage{{tabularx}}
+\\usepackage{{array}}
 \\geometry{{a4paper, margin=1in}}
 
 \\begin{{document}}

@@ -30,6 +30,13 @@ def read_survey(path, topic):
         dic = json.loads(f.read())
     return dic['survey'], dic['reference']
 
+
+def map_five_to_hundred(score):
+    try:
+        return float(score) * 20.0
+    except Exception:
+        return score
+
 def evaluate(args):
 
     db = database(db_path = args.db_path, embedding_model = args.embedding_model)
@@ -48,16 +55,24 @@ def evaluate(args):
     recall, precision = judge.citation_quality(survey, references)
 
     image_benchmark_summary = ""
+    image_benchmark_score = None
     image_benchmark_path = os.path.join(args.saving_path, 'image_benchmark.txt')
     if os.path.exists(image_benchmark_path):
         with open(image_benchmark_path, 'r', encoding='utf-8') as f:
             image_benchmark_summary = f.read().strip()
+        try:
+            image_benchmark_score = json.loads(image_benchmark_summary).get("summary_score")
+        except Exception:
+            image_benchmark_score = None
 
-    with open(f'{args.saving_path}/{args.topic}_evaluation.txt', 'a+') as f:
+    with open(f'{args.saving_path}/{args.topic}_evaluation.txt', 'w', encoding='utf-8') as f:
         result = f'Judged by {args.model}:\n'
         for c, s in zip(criterion, scores):
-            result += f'{c} = {s}\n'
+            mapped = map_five_to_hundred(s)
+            result += f'{c} = {mapped:.1f} ({float(s):.1f}/5.0)\n'
         result += f'Citation Recall = {recall:.4f}\nCitation Precision = {precision:.4f}\n'
+        if image_benchmark_score is not None:
+            result += f'Image Benchmark Score = {image_benchmark_score:.2f}\n'
         if image_benchmark_summary:
             result += f'Image Benchmark = {image_benchmark_summary}\n'
         f.write(result)

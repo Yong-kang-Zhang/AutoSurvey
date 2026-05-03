@@ -24,7 +24,7 @@ class ImageBenchmarkAgent:
         except Exception:
             return {}
 
-    def evaluate_image(self, image_path, topic, section_name, caption, context_text):
+    def evaluate_image(self, image_path, topic, section_name, caption, context_text, persist=True):
         try:
             with open(image_path, "rb") as f:
                 base64_image = base64.b64encode(f.read()).decode("utf-8")
@@ -44,16 +44,26 @@ Judge the image on:
 4. structural clarity
 5. overall suitability for a survey figure
 
+Scoring rules:
+- Use a 0-100 scale for every score.
+- 100 means excellent, publication-ready performance on that dimension.
+- 80 means strong with minor weaknesses.
+- 60 means acceptable but clearly flawed.
+- 40 means weak.
+- 20 means poor.
+- 0 means unusable.
+- Do not use 1-5 or 1-10 scales.
+
 Return strict JSON only:
 {{
-  "pass": true,
   "scores": {{
-    "relevance": 1,
-    "accuracy": 1,
-    "legibility": 1,
-    "clarity": 1,
-    "overall": 1
+    "relevance": 0,
+    "accuracy": 0,
+    "legibility": 0,
+    "clarity": 0,
+    "overall": 0
   }},
+  "summary_score": 0,
   "issues": ["..."],
   "suggestions": ["..."]
 }}
@@ -85,12 +95,13 @@ Return strict JSON only:
             parsed = self._parse_json(content)
             if not parsed:
                 parsed = {
-                    "pass": False,
-                    "scores": {"relevance": 1, "accuracy": 1, "legibility": 1, "clarity": 1, "overall": 1},
+                    "scores": {"relevance": 0, "accuracy": 0, "legibility": 0, "clarity": 0, "overall": 0},
+                    "summary_score": 0,
                     "issues": ["Failed to parse benchmark output"],
                     "suggestions": [],
                     "raw": content,
                 }
+            parsed = self._normalize_result(parsed)
 
             record = {
                 "image": image_path,
@@ -99,23 +110,65 @@ Return strict JSON only:
                 "caption": caption,
                 "result": parsed,
             }
-            self.records.append(record)
+            if persist:
+                self.records.append(record)
             return record
         except Exception as e:
-            record = {
+            result_record = {
                 "image": image_path,
                 "topic": topic,
                 "section": section_name,
                 "caption": caption,
                 "result": {
-                    "pass": False,
                     "scores": {"relevance": 0, "accuracy": 0, "legibility": 0, "clarity": 0, "overall": 0},
+                    "summary_score": 0,
                     "issues": [str(e)],
                     "suggestions": [],
                 },
             }
-            self.records.append(record)
-            return record
+            if persist:
+                self.records.append(result_record)
+            return result_record
+
+    def _normalize_score(self, value):
+        try:
+            score = float(value)
+        except Exception:
+            return 0
+        if score <= 1:
+            score *= 100
+        elif score <= 5:
+            score *= 20
+        elif score <= 10:
+            score *= 10
+        return max(0, min(100, round(score, 2)))
+
+    def _normalize_result(self, parsed):
+        scores = parsed.get("scores", {}) or {}
+        normalized_scores = {}
+        for key in ["relevance", "accuracy", "legibility", "clarity", "overall"]:
+            normalized_scores[key] = self._normalize_score(scores.get(key, 0))
+        parsed["scores"] = normalized_scores
+        raw_summary = parsed.get("summary_score", None)
+        normalized_summary = self._normalize_score(raw_summary) if raw_summary is not None else 0
+        average_summary = round(sum(normalized_scores.values()) / len(normalized_scores), 2) if normalized_scores else 0
+
+        if normalized_summary <= 0:
+            parsed["summary_score"] = average_summary
+        elif abs(normalized_summary - average_summary) > 25:
+            parsed["summary_score"] = average_summary
+        else:
+            parsed["summary_score"] = normalized_summary
+        return parsed
+
+    def _deduplicate_records(self):
+        latest_by_image = {}
+        for record in self.records:
+            image = record.get("image", "")
+            if not image:
+                continue
+            latest_by_image[image] = record
+        return list(latest_by_image.values())
 
     def save(self, saving_path):
         if not self.records:
@@ -123,22 +176,22 @@ Return strict JSON only:
         os.makedirs(saving_path, exist_ok=True)
         json_path = os.path.join(saving_path, "image_benchmark.json")
         txt_path = os.path.join(saving_path, "image_benchmark.txt")
+        final_records = self._deduplicate_records()
         with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(self.records, f, indent=4, ensure_ascii=False)
+            json.dump(final_records, f, indent=4, ensure_ascii=False)
 
         avg = {}
         keys = ["relevance", "accuracy", "legibility", "clarity", "overall"]
         for key in keys:
             vals = []
-            for record in self.records:
+            for record in final_records:
                 scores = record.get("result", {}).get("scores", {})
                 if key in scores:
                     vals.append(scores[key])
             avg[key] = sum(vals) / len(vals) if vals else 0
-        pass_rate = 0
-        if self.records:
-            pass_rate = sum(1 for record in self.records if record.get("result", {}).get("pass")) / len(self.records)
+        summary_scores = [record.get("result", {}).get("summary_score", 0) for record in final_records]
+        overall_summary = sum(summary_scores) / len(summary_scores) if summary_scores else 0
 
         with open(txt_path, "w", encoding="utf-8") as f:
-            f.write(json.dumps({"avg_scores": avg, "pass_rate": pass_rate, "count": len(self.records)}, ensure_ascii=False, indent=4))
+            f.write(json.dumps({"avg_scores": avg, "summary_score": overall_summary, "count": len(final_records)}, ensure_ascii=False, indent=4))
         return json_path

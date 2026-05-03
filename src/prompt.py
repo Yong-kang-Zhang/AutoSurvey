@@ -6,7 +6,16 @@ Here is an academic survey about the topic "[TOPIC]":
 ---
 
 <instruction>
-Please evaluate this survey about the topic "[TOPIC]" based on the criterion above provided below, and give a score from 1 to 5 according to the score description:
+Please evaluate this survey about the topic "[TOPIC]" based on the criterion above provided below.
+Use the original AutoSurvey five-point scoring standard, but you may return one decimal place for finer resolution.
+Scoring rules:
+- 1.0 means the survey matches Score 1 Description
+- 2.0 means the survey matches Score 2 Description
+- 3.0 means the survey matches Score 3 Description
+- 4.0 means the survey matches Score 4 Description
+- 5.0 means the survey matches Score 5 Description
+- Intermediate scores such as 3.2, 3.8, or 4.6 are allowed when the survey falls between two bands.
+- Return a score between 1.0 and 5.0.
 ---
 Criterion Description: [Criterion Description]
 ---
@@ -223,6 +232,13 @@ Here is the requirement you must follow:
     Note that the "paper_title" is not allowed to appear without a '[]' format. Once you mention the 'paper_title', it must be included in '[]'. Papers not existing above are not allowed to cite!!!
     Remember that you can only cite the paper provided above and only cite the "paper_title"!!!
 3. Only when the main part of the paper support your claims, you cite it.
+4. Aim for roughly [CITATION NUM] citation spans in this subsection when the evidence supports it. Do not force citations into generic setup sentences, but do support factual, comparative, historical, benchmark, and method-specific claims.
+5. Most factual or comparative claims should be supported by citations. As a rule of thumb, do not leave more than 2-3 factual sentences in a row without citation support.
+6. When comparing methods, benchmarks, limitations, or trends, prefer citing multiple relevant papers in the same citation bracket.
+7. Use the available paper list with reasonable breadth. If different claims are supported by different papers, avoid repeatedly citing the same small subset when better-supported alternatives are provided.
+8. When the subsection discusses multiple method families, datasets, benchmarks, or application settings, try to involve at least [UNIQUE PAPER NUM] distinct paper titles across the subsection if the evidence supports it.
+9. Do not include markdown tables. Tables, if needed, will be inserted in a later controlled post-processing step.
+10. Prefer survey-style synthesis over repeatedly centering the same flagship papers. When the literature is broad enough, cite both seminal and recent representative works, and distribute citations across the subsection rather than concentrating them in one paragraph.
 
 
 Here's a concise guideline for when to cite papers in a survey:
@@ -242,6 +258,32 @@ Return the content of subsection "[SUBSECTION NAME]" in the format:
 [CONTENT OF SUBSECTION]
 </format>
 Only return the content more than [WORD NUM] words you write for the subsection [SUBSECTION NAME] without any other information:
+'''
+
+CITATION_ENRICH_PROMPT = '''
+You are revising a survey subsection about [TOPIC].
+You are only allowed to use the papers listed below for citations:
+---
+[PAPER LIST]
+---
+
+Current subsection:
+---
+[SUBSECTION]
+---
+
+Task:
+1. Add missing citations to factual, comparative, historical, benchmark-related, or method-specific claims that currently lack support.
+2. Reach at least [CITATION NUM] citation spans if the evidence above supports it.
+3. Broaden citation coverage when the subsection spans multiple subtopics. Try to use at least [UNIQUE CITATION NUM] distinct paper titles when the evidence supports it.
+4. Prefer 1-3 highly relevant papers in a citation bracket for factual or comparative claims rather than repeatedly reusing the same few titles.
+5. Do not remove correct existing citations.
+6. Do not change the wording unless needed to attach a citation naturally.
+7. Only cite paper_title values from the provided paper list.
+8. Do not add markdown tables, bullet lists, or new headings.
+9. If the current subsection overuses the same few papers while other relevant papers in the provided pool support nearby claims, diversify the citations.
+
+Return only the revised subsection text.
 '''
 
 

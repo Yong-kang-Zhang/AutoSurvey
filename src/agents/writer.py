@@ -1,3 +1,4 @@
+import math
 import re
 import threading
 import time
@@ -5,7 +6,7 @@ import copy
 
 from src.model import APIModel
 from src.utils import tokenCounter
-from src.prompt import SUBSECTION_WRITING_PROMPT, LCE_PROMPT, CHECK_CITATION_PROMPT
+from src.prompt import SUBSECTION_WRITING_PROMPT, LCE_PROMPT, CHECK_CITATION_PROMPT, CITATION_ENRICH_PROMPT
 
 
 class subsectionWriter():
@@ -18,6 +19,49 @@ class subsectionWriter():
         self.token_counter = tokenCounter()
         self.input_token_usage, self.output_token_usage = 0, 0
 
+    def compute_subsection_reference_plan(self, subsection_descriptions, allowed_ids, rag_num, global_used_ids=None):
+        candidate_pool = list(allowed_ids) if allowed_ids else []
+        plans = []
+        used_ids = set(global_used_ids or set())
+        if candidate_pool:
+            total_subsections = max(1, len(subsection_descriptions))
+            target_unique_budget = min(
+                len(candidate_pool),
+                max(math.ceil(rag_num * total_subsections * 1.45), rag_num + 140),
+            )
+            per_subsection_budget = max(rag_num + 6, math.ceil(target_unique_budget / total_subsections))
+        else:
+            per_subsection_budget = rag_num
+
+        for idx, description in enumerate(subsection_descriptions):
+            if candidate_pool:
+                ranked_ids = self.db.rank_papers_by_query(
+                    description,
+                    candidate_pool,
+                    num=max(per_subsection_budget * 5, rag_num * 4),
+                )
+                fresh_ids = [pid for pid in ranked_ids if pid not in used_ids]
+                chosen_ids = fresh_ids[:per_subsection_budget]
+                if len(chosen_ids) < per_subsection_budget:
+                    for pid in ranked_ids:
+                        if pid not in chosen_ids:
+                            chosen_ids.append(pid)
+                        if len(chosen_ids) >= per_subsection_budget:
+                            break
+                if idx == len(subsection_descriptions) - 1 and len(used_ids) < min(len(candidate_pool), 180):
+                    remaining_ids = [pid for pid in ranked_ids if pid not in chosen_ids]
+                    for pid in remaining_ids:
+                        chosen_ids.append(pid)
+                        if len(chosen_ids) >= max(per_subsection_budget + 4, rag_num + 4):
+                            break
+                chosen_ids = chosen_ids[:max(per_subsection_budget + 4, rag_num + 4)]
+            else:
+                chosen_ids = self.db.get_ids_from_query(description, num=per_subsection_budget, shuffle=False)
+
+            used_ids.update(chosen_ids)
+            plans.append(chosen_ids)
+        return plans, used_ids
+
     def write(self, topic, outline, rag_num=30, subsection_len=500, refining=True, reflection=True, saving_path="./output/", illustrator_agent=None, rag_context=None):
         parsed_outline = self.parse_outline(outline=outline)
         section_content = [[] for _ in range(len(parsed_outline['sections']))]
@@ -25,17 +69,27 @@ class subsectionWriter():
         section_paper_texts = [[] for _ in range(len(parsed_outline['sections']))]
         total_ids = []
         section_references_ids = [[] for _ in range(len(parsed_outline['sections']))]
+        section_citation_targets = [[] for _ in range(len(parsed_outline['sections']))]
+        section_unique_paper_targets = [[] for _ in range(len(parsed_outline['sections']))]
         allowed_ids = set(getattr(rag_context, 'selected_ids', []) or [])
+        global_used_ids = set()
 
         for i in range(len(parsed_outline['sections'])):
             descriptions = parsed_outline['subsection_descriptions'][i]
-            for d in descriptions:
-                if allowed_ids:
-                    references_ids = self.db.rank_papers_by_query(d, list(allowed_ids), num=rag_num)
-                else:
-                    references_ids = self.db.get_ids_from_query(d, num=rag_num, shuffle=False)
+            subsection_reference_plan, global_used_ids = self.compute_subsection_reference_plan(
+                descriptions,
+                allowed_ids,
+                rag_num,
+                global_used_ids=global_used_ids,
+            )
+            for d, references_ids in zip(descriptions, subsection_reference_plan):
                 total_ids += references_ids
                 section_references_ids[i].append(references_ids)
+                citation_target = self.estimate_citation_target(subsection_len, len(references_ids))
+                section_citation_targets[i].append(citation_target)
+                section_unique_paper_targets[i].append(
+                    self.estimate_unique_paper_target(len(references_ids), citation_target)
+                )
 
         total_references_infos = self.db.get_paper_info_from_ids(list(set(total_ids)))
         temp_title_dic = {p['id']: p['title'] for p in total_references_infos}
@@ -65,7 +119,9 @@ class subsectionWriter():
                     section_content,
                     i,
                     rag_num,
-                    str(subsection_len),
+                    subsection_len,
+                    section_citation_targets[i],
+                    section_unique_paper_targets[i],
                 ),
             )
             thread_l.append(thread)
@@ -74,11 +130,19 @@ class subsectionWriter():
         for thread in thread_l:
             thread.join()
 
+        section_content = self.strip_uncontrolled_tables_from_sections(section_content)
         raw_survey = self.generate_document(parsed_outline, section_content)
         raw_survey_with_references, raw_references = self.process_references(raw_survey)
 
         if refining:
             final_section_content = self.refine_subsections(topic, outline, section_content)
+            final_section_content = self.strip_uncontrolled_tables_from_sections(final_section_content)
+            final_section_content = self.insert_section_tables(
+                topic,
+                parsed_outline,
+                final_section_content,
+                section_paper_texts,
+            )
             if illustrator_agent:
                 final_section_content = illustrator_agent.enrich_sections_with_diagrams(
                     topic,
@@ -97,6 +161,125 @@ class subsectionWriter():
                 refined_references,
             )
         return raw_survey + '\n', raw_survey_with_references + '\n', raw_references
+
+    def strip_uncontrolled_tables_from_sections(self, section_content):
+        cleaned = []
+        for subsections in section_content:
+            cleaned.append([self.remove_markdown_tables(content) for content in subsections])
+        return cleaned
+
+    def remove_markdown_tables(self, text):
+        if not text:
+            return text
+
+        separator_pattern = re.compile(r'^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$')
+        lines = text.splitlines()
+        cleaned = []
+        i = 0
+
+        while i < len(lines):
+            if i + 1 < len(lines) and '|' in lines[i] and separator_pattern.match(lines[i + 1].strip()):
+                i += 2
+                while i < len(lines) and lines[i].strip().startswith('|'):
+                    i += 1
+                while i < len(lines) and not lines[i].strip():
+                    i += 1
+                if cleaned and cleaned[-1].strip():
+                    cleaned.append('')
+                continue
+
+            cleaned.append(lines[i])
+            i += 1
+
+        return re.sub(r'\n{3,}', '\n\n', '\n'.join(cleaned)).strip()
+
+    def insert_block_after_first_paragraph(self, text, block):
+        block = (block or '').strip()
+        body = (text or '').strip()
+        if not block:
+            return body
+        if not body:
+            return block
+
+        parts = re.split(r'\n\s*\n', body, maxsplit=1)
+        if len(parts) == 1:
+            return body + "\n\n" + block
+        return parts[0].strip() + "\n\n" + block + "\n\n" + parts[1].strip()
+
+    def score_section_for_table(self, section_name, subsection_titles, subsection_contents):
+        text = " ".join([section_name] + list(subsection_titles) + [c[:1200] for c in subsection_contents]).lower()
+        weights = {
+            'comparison': 4,
+            'compare': 4,
+            'benchmark': 4,
+            'evaluation': 4,
+            'dataset': 3,
+            'architecture': 3,
+            'method': 3,
+            'approach': 3,
+            'application': 2,
+            'challenge': 2,
+            'limitation': 2,
+            'taxonomy': 3,
+            'framework': 3,
+            'pipeline': 3,
+            'empirical': 3,
+        }
+        penalties = {
+            'introduction': 4,
+            'background': 1,
+            'future': 5,
+            'outlook': 5,
+            'conclusion': 5,
+        }
+
+        score = 0
+        for key, weight in weights.items():
+            if key in text:
+                score += weight
+        lowered_name = section_name.lower()
+        for key, weight in penalties.items():
+            if key in lowered_name:
+                score -= weight
+
+        citation_density = len(re.findall(r'\[[^\]]+\]', " ".join(subsection_contents)))
+        score += min(4, citation_density // 10)
+        if len(subsection_contents) >= 3:
+            score += 1
+        return score
+
+    def pick_table_anchor_subsection(self, subsection_titles, subsection_contents):
+        best_idx = 0
+        best_score = -10**9
+        weights = {
+            'comparison': 5,
+            'compare': 5,
+            'benchmark': 5,
+            'evaluation': 4,
+            'dataset': 4,
+            'architecture': 3,
+            'method': 3,
+            'application': 2,
+            'challenge': 2,
+            'limitation': 2,
+            'taxonomy': 3,
+        }
+        penalties = {'introduction': 4, 'future': 5, 'outlook': 5, 'conclusion': 5}
+
+        for idx, (title, content) in enumerate(zip(subsection_titles, subsection_contents)):
+            text = f"{title}\n{content[:1800]}".lower()
+            score = 0
+            for key, weight in weights.items():
+                if key in text:
+                    score += weight
+            for key, weight in penalties.items():
+                if key in title.lower():
+                    score -= weight
+            score += min(3, len(re.findall(r'\[[^\]]+\]', content)) // 6)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+        return best_idx
 
     def refine_subsections(self, topic, outline, section_content):
         section_content_even = copy.deepcopy(section_content)
@@ -135,11 +318,136 @@ class subsectionWriter():
 
         return final_section_content
 
-    def write_subsection_with_reflection(self, paper_texts_l, topic, outline, section, subsections, subdescriptions, res_l, idx, rag_num=20, subsection_len=1000, citation_num=8):
+    def insert_section_tables(self, topic, parsed_outline, section_content, section_paper_texts):
+        prompts = []
+        prompt_meta = []
+        max_tables = max(3, min(5, round(len(parsed_outline['sections']) * 0.5)))
+        section_rankings = []
+
+        for i, section_name in enumerate(parsed_outline['sections']):
+            score = self.score_section_for_table(
+                section_name,
+                parsed_outline['subsections'][i],
+                section_content[i],
+            )
+            section_rankings.append((score, i))
+
+        candidate_indices = [
+            idx for score, idx in sorted(section_rankings, reverse=True)
+            if score > 0
+        ][: min(len(parsed_outline['sections']), max_tables + 2)]
+
+        for i in candidate_indices:
+            section_name = parsed_outline['sections'][i]
+            subsections = parsed_outline['subsections'][i]
+            subsection_text = "\n\n".join(
+                f"### {sub}\n{content}" for sub, content in zip(subsections, section_content[i])
+            )
+            paper_context = "\n".join(section_paper_texts[i][: min(3, len(section_paper_texts[i]))])
+            if not subsection_text.strip() or not paper_context.strip():
+                continue
+            default_insert_idx = self.pick_table_anchor_subsection(subsections, section_content[i])
+            prompt = f"""
+You are revising an academic survey section about {topic}.
+Section title: {section_name}
+
+Current section text:
+---
+{subsection_text[:9000]}
+---
+
+Reference papers:
+---
+{paper_context[:9000]}
+---
+
+Task:
+1. Produce at most one concise markdown table for this section, and only if a table clearly adds value.
+2. Prefer survey-style "main comparison tables" rather than many small local tables.
+3. The table should compare representative methods, datasets, mechanisms, capabilities, limitations, or evaluation settings that are genuinely discussed in the section.
+4. Keep the table to 4-6 columns and 4-7 rows.
+5. Each row should be content-dense and academically useful.
+6. When a row contains a concrete claim about a method, benchmark, limitation, or dataset, include supporting citations in the relevant cell using [paper_title] format and only cite papers from the reference papers above.
+7. Insert the table after the single best subsection for comparison or synthesis. The default best subsection index is {default_insert_idx + 1}, but you may choose a different one if the section text clearly suggests a better anchor.
+8. Do not add any prose before or after the table.
+9. If the section is mainly conceptual, introductory, or narrative and a table would feel redundant, return [NO_TABLE].
+
+Return exactly one of the following formats:
+[NO_TABLE]
+or
+[INSERT_AFTER_SUBSECTION]
+{default_insert_idx + 1}
+[/INSERT_AFTER_SUBSECTION]
+[TABLE]
+| Column A | Column B |
+| --- | --- |
+| ... | ... |
+[/TABLE]
+"""
+            prompts.append(prompt)
+            prompt_meta.append((i, default_insert_idx))
+
+        if not prompts:
+            return section_content
+
+        tables = self.api_model.batch_chat(prompts, temperature=0.2)
+        inserted = 0
+        for (i, default_insert_idx), table_text in zip(prompt_meta, tables):
+            if inserted >= max_tables:
+                break
+            cleaned = table_text.strip().replace('<format>', '').replace('</format>', '')
+            if '[NO_TABLE]' in cleaned:
+                continue
+            table_match = re.search(r'\[TABLE\](.*?)\[/TABLE\]', cleaned, re.DOTALL | re.IGNORECASE)
+            insert_match = re.search(r'\[INSERT_AFTER_SUBSECTION\](.*?)\[/INSERT_AFTER_SUBSECTION\]', cleaned, re.DOTALL | re.IGNORECASE)
+            table_block = table_match.group(1).strip() if table_match else cleaned
+            table_block = re.sub(r'^```(?:markdown)?\s*', '', table_block, flags=re.IGNORECASE)
+            table_block = re.sub(r'\s*```$', '', table_block)
+            if '|' not in table_block or table_block.count('|') < 6:
+                continue
+
+            insert_idx = default_insert_idx
+            if insert_match:
+                match = re.search(r'\d+', insert_match.group(1))
+                if match:
+                    insert_idx = int(match.group(0)) - 1
+
+            if not section_content[i]:
+                continue
+            insert_idx = max(0, min(insert_idx, len(section_content[i]) - 1))
+            section_content[i][insert_idx] = self.insert_block_after_first_paragraph(
+                section_content[i][insert_idx],
+                table_block,
+            )
+            inserted += 1
+        return section_content
+
+    def estimate_citation_target(self, subsection_len, available_papers):
+        try:
+            word_num = int(subsection_len)
+        except Exception:
+            word_num = 500
+        soft_target = max(8, round(word_num / 48))
+        if available_papers > 0:
+            soft_target = min(soft_target, max(8, math.ceil(available_papers * 0.72)))
+        return soft_target
+
+    def estimate_unique_paper_target(self, available_papers, citation_target):
+        if available_papers <= 0:
+            return 0
+        return min(available_papers, max(10, min(citation_target + 5, math.ceil(available_papers * 0.62))))
+
+    def write_subsection_with_reflection(self, paper_texts_l, topic, outline, section, subsections, subdescriptions, res_l, idx, rag_num=20, subsection_len=1000, citation_targets=None, unique_paper_targets=None):
         prompts = []
         for j in range(len(subsections)):
             subsection = subsections[j]
-            description = subdescriptions[j]
+            description = subdescriptions[j] if j < len(subdescriptions) else subsection
+            citation_target = 6
+            unique_paper_target = 8
+            if citation_targets and j < len(citation_targets):
+                citation_target = citation_targets[j]
+            if unique_paper_targets and j < len(unique_paper_targets):
+                unique_paper_target = unique_paper_targets[j]
             prompt = self.__generate_prompt(
                 SUBSECTION_WRITING_PROMPT,
                 paras={
@@ -150,7 +458,8 @@ class subsectionWriter():
                     'PAPER LIST': paper_texts_l[j],
                     'SECTION NAME': section,
                     'WORD NUM': str(subsection_len),
-                    'CITATION NUM': str(citation_num),
+                    'CITATION NUM': str(citation_target),
+                    'UNIQUE PAPER NUM': str(unique_paper_target),
                 },
             )
             prompts.append(prompt)
@@ -158,7 +467,38 @@ class subsectionWriter():
         self.input_token_usage += self.token_counter.num_tokens_from_list_string(prompts)
         contents = self.api_model.batch_chat(prompts, temperature=1)
         self.output_token_usage += self.token_counter.num_tokens_from_list_string(contents)
-        contents = [c.replace('<format>', '').replace('</format>', '') for c in contents]
+        contents = [
+            self.remove_markdown_tables(c.replace('<format>', '').replace('</format>', ''))
+            for c in contents
+        ]
+
+        enrich_prompts = []
+        for j, (content, paper_texts) in enumerate(zip(contents, paper_texts_l)):
+            citation_target = 6
+            unique_paper_target = 8
+            if citation_targets and j < len(citation_targets):
+                citation_target = citation_targets[j] + 3
+            if unique_paper_targets and j < len(unique_paper_targets):
+                unique_paper_target = unique_paper_targets[j]
+            enrich_prompts.append(
+                self.__generate_prompt(
+                    CITATION_ENRICH_PROMPT,
+                    paras={
+                        'SUBSECTION': content,
+                        'TOPIC': topic,
+                        'PAPER LIST': paper_texts,
+                        'CITATION NUM': str(citation_target),
+                        'UNIQUE CITATION NUM': str(unique_paper_target + 1),
+                    },
+                )
+            )
+        self.input_token_usage += self.token_counter.num_tokens_from_list_string(enrich_prompts)
+        contents = self.api_model.batch_chat(enrich_prompts, temperature=0.3)
+        self.output_token_usage += self.token_counter.num_tokens_from_list_string(contents)
+        contents = [
+            self.remove_markdown_tables(c.replace('<format>', '').replace('</format>', ''))
+            for c in contents
+        ]
 
         prompts = []
         for content, paper_texts in zip(contents, paper_texts_l):
@@ -171,7 +511,10 @@ class subsectionWriter():
         self.input_token_usage += self.token_counter.num_tokens_from_list_string(prompts)
         contents = self.api_model.batch_chat(prompts, temperature=1)
         self.output_token_usage += self.token_counter.num_tokens_from_list_string(contents)
-        contents = [c.replace('<format>', '').replace('</format>', '') for c in contents]
+        contents = [
+            self.remove_markdown_tables(c.replace('<format>', '').replace('</format>', ''))
+            for c in contents
+        ]
 
         res_l[idx] = contents
         return contents
@@ -232,6 +575,14 @@ class subsectionWriter():
         updated_text, references = self.replace_citations_with_numbers(citations, protected_survey)
         return self.restore_non_citation_blocks(updated_text, placeholders), references
 
+    def strip_internal_headings(self, text):
+        cleaned_lines = []
+        for line in text.splitlines():
+            if re.match(r'^\s*#{2,6}\s+', line):
+                continue
+            cleaned_lines.append(line)
+        return '\n'.join(cleaned_lines).strip()
+
     def generate_document(self, parsed_outline, subsection_contents):
         document = []
         document.append(f"# {parsed_outline['title']}\n")
@@ -241,7 +592,7 @@ class subsectionWriter():
             for j, subsection in enumerate(parsed_outline['subsections'][i]):
                 document.append(f"### {subsection}\n")
                 if i < len(subsection_contents) and j < len(subsection_contents[i]):
-                    document.append(subsection_contents[i][j] + "\n")
+                    document.append(self.strip_internal_headings(subsection_contents[i][j]) + "\n")
 
         return "\n".join(document)
 

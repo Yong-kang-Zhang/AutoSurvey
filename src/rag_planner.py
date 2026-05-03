@@ -12,6 +12,8 @@ class RAGContext:
     candidate_ids: list
     selected_ids: list
     keyword_to_ids: dict
+    selected_target: int
+    keep_strategy: str
 
     def to_dict(self):
         return asdict(self)
@@ -26,7 +28,7 @@ class TopicRAGPlanner:
         database,
         keyword_num: int = 5,
         candidate_per_keyword: int = 12,
-        keep_num: int = 60,
+        keep_num: int = 0,
         filter_chunk_size: int = 12,
     ) -> None:
         self.api_model = APIModel(model, api_key, api_url)
@@ -35,6 +37,15 @@ class TopicRAGPlanner:
         self.candidate_per_keyword = candidate_per_keyword
         self.keep_num = keep_num
         self.filter_chunk_size = filter_chunk_size
+
+    def resolve_keep_num(self, candidate_ids):
+        if self.keep_num and self.keep_num > 0:
+            return min(self.keep_num, len(candidate_ids)) if candidate_ids else self.keep_num
+        if not candidate_ids:
+            return max(180, self.keyword_num * 18)
+        auto_keep = max(180, int(len(candidate_ids) * 0.78))
+        auto_keep = max(auto_keep, self.keyword_num * 18)
+        return min(len(candidate_ids), auto_keep)
 
     def _generate_prompt(self, template, paras):
         prompt = template
@@ -78,6 +89,7 @@ Task:
 1. Propose {self.keyword_num} concise search keywords or subtopics.
 2. Each keyword should be short, specific, and useful for retrieval.
 3. Avoid duplicates and overly broad wording.
+4. Cover different literature axes when possible, such as core methods, architectures, training or inference strategies, evaluation settings, applications, and limitations.
 
 Return strict JSON only in the form:
 ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"]
@@ -101,7 +113,9 @@ Return strict JSON only in the form:
 
     def filter_candidates(self, topic, keywords, candidate_ids):
         if not candidate_ids:
-            return []
+            return [], self.resolve_keep_num(candidate_ids)
+
+        keep_num = self.resolve_keep_num(candidate_ids)
 
         candidate_infos = self.db.get_paper_info_from_ids(candidate_ids)
         prompts = []
@@ -125,6 +139,7 @@ Keywords: {", ".join(keywords)}
 
 Select the most relevant papers from the candidate list below.
 Keep papers that are central, complementary, and useful for building the survey.
+Prefer a balanced pool covering seminal works, representative methods, strong empirical studies, benchmarks, applications, and challenge-oriented papers when they are relevant to the topic.
 Avoid weakly related, duplicate, or tangential papers.
 Return strict JSON only:
 {{"selected_ids": ["id1", "id2"]}}
@@ -148,7 +163,7 @@ Candidate papers:
         ranked_fallback = self.db.rank_papers_by_query(
             topic + ' ' + ' '.join(keywords),
             candidate_ids,
-            num=self.keep_num,
+            num=keep_num,
         )
 
         merged = []
@@ -158,18 +173,20 @@ Candidate papers:
 
         if not merged:
             merged = ranked_fallback or candidate_ids
-        return merged[:self.keep_num]
+        return merged[:keep_num], keep_num
 
     def build(self, topic):
         keywords = self.generate_keywords(topic)
         candidate_ids, keyword_to_ids = self.retrieve_candidates(topic, keywords)
-        selected_ids = self.filter_candidates(topic, keywords, candidate_ids)
+        selected_ids, keep_num = self.filter_candidates(topic, keywords, candidate_ids)
         if not selected_ids:
-            selected_ids = candidate_ids[:self.keep_num]
+            selected_ids = candidate_ids[:keep_num]
         return RAGContext(
             topic=topic,
             keywords=keywords,
             candidate_ids=candidate_ids,
             selected_ids=selected_ids,
             keyword_to_ids=keyword_to_ids,
+            selected_target=keep_num,
+            keep_strategy='fixed' if self.keep_num and self.keep_num > 0 else 'auto',
         )
