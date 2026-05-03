@@ -337,13 +337,15 @@ Subsection focus:
 
 Task:
 1. Preserve the prose, logic, and technical meaning of the subsection.
-2. Add or replace citations so the subsection draws on a broader set of relevant papers from the provided pool.
+2. The current subsection has about [CURRENT CITATION NUM] citation spans and [CURRENT UNIQUE CITATION NUM] distinct cited paper titles. Improve it toward at least [TARGET CITATION NUM] citation spans and [TARGET UNIQUE CITATION NUM] distinct cited paper titles when the evidence supports it.
 3. Prioritize claims about benchmarks, applications, robustness, calibration, privacy, retrieval, multimodality, and domain adaptation for citation expansion, because these claims usually admit multiple valid supporting papers.
 4. Prefer 2-3 representative papers in a bracket when a claim reflects a trend, comparison, or method family.
 5. Reduce repeated reuse of the same paper across unrelated claims when other valid papers from the pool support those claims.
-6. Keep citations accurate. Remove unsupported citations rather than forcing them.
-7. Only edit citations and very small local wording needed to attach them naturally.
-8. Do not add tables, bullet lists, headings, code fences, or image markdown.
+6. Prefer to incorporate relevant papers from this priority list when they genuinely support the claim:
+[PRIORITY PAPERS]
+7. Keep citations accurate. Remove unsupported citations rather than forcing them.
+8. Only edit citations and very small local wording needed to attach them naturally.
+9. Do not add tables, bullet lists, headings, code fences, or image markdown.
 
 Return only the revised subsection text.
 '''

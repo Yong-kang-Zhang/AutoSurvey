@@ -15,6 +15,22 @@ class MD2LatexConverter:
         self.tex_filepath = os.path.join(self.base_dir, self.filename.replace('.md', '.tex'))
         self.fig_dir = os.path.join(self.base_dir, 'fig')
 
+    def _escape_latex_text(self, text):
+        replacements = {
+            '\\': r'\textbackslash{}',
+            '&': r'\&',
+            '%': r'\%',
+            '$': r'\$',
+            '#': r'\#',
+            '_': r'\_',
+            '{': r'\{',
+            '}': r'\}',
+        }
+        escaped = []
+        for ch in text:
+            escaped.append(replacements.get(ch, ch))
+        return ''.join(escaped)
+
     def convert_tables(self, match):
         table_text = match.group(0)
         lines = table_text.strip().split('\n')
@@ -183,7 +199,7 @@ class MD2LatexConverter:
             new_img_path = os.path.join(self.fig_dir, img_name)
             if os.path.exists(old_img_path):
                 shutil.move(old_img_path, new_img_path)
-            caption = caption.replace('\n', ' ').strip()
+            caption = self._escape_latex_text(caption.replace('\n', ' ').strip())
             return (f"\\begin{{figure}}[H]\n\\centering\n\\includegraphics[width=0.96\\textwidth,height=0.78\\textheight,keepaspectratio]{{fig/{img_name}}}\n"
                     f"\\caption{{{caption}}}\n\\end{{figure}}\n")
 
@@ -197,7 +213,16 @@ class MD2LatexConverter:
             img_rel_path = match.group(2)
             return build_figure_block(caption, img_rel_path)
 
-        tex_text = re.sub(r'\*\*(.*?)\*\*\s*\n\s*!\[(.*?)\]\((.*?)\)', bold_caption_image_repl, tex_text, flags=re.DOTALL)
+        tex_text = re.sub(
+            r'(?m)^\s*\*\*(Figure:[^\n]*?)\*\*\s*\n\s*!\[(.*?)\]\((.*?)\)\s*$',
+            bold_caption_image_repl,
+            tex_text,
+        )
+        tex_text = re.sub(
+            r'(?m)^\s*\*\*([^\n]+?)\*\*\s*$',
+            lambda m: f"\\paragraph{{{self._escape_latex_text(m.group(1).strip())}}}",
+            tex_text,
+        )
         tex_text = re.sub(r'!\[(.*?)\]\((.*?)\)', image_repl, tex_text)
         tex_text = re.sub(r'(^\|.*\|\s*\n)+', self.convert_tables, tex_text, flags=re.MULTILINE)
         tex_text = re.sub(r'^# (.*?)$', r'\\title{\1}\n\\maketitle\n', tex_text, flags=re.MULTILINE)
@@ -225,6 +250,8 @@ class MD2LatexConverter:
 \\usepackage{{booktabs}}
 \\usepackage{{tabularx}}
 \\usepackage{{array}}
+\\usepackage{{amsmath}}
+\\usepackage{{amssymb}}
 \\geometry{{a4paper, margin=1in}}
 
 \\begin{{document}}

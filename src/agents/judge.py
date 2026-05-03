@@ -72,8 +72,9 @@ class Judge():
         '''
         criterion_paras = CRITERIA[criterion]
 
-        content_paras = {'TOPIC':topic,'SURVEY':survey, 'Criterion Description': criterion_paras['description'],'Score 1 Description':criterion_paras['score1'], 'Score 2 Description':criterion_paras['score2'],\
-                         'Score 3 Description':criterion_paras['score3'],'Score 4 Description':criterion_paras['score4'], 'Score 5 Description':criterion_paras['score5']}
+        content_paras = {'TOPIC':topic,'SURVEY':survey, 'Criterion Description': criterion_paras['description']}
+        for score in range(1, 6):
+            content_paras[f'Score {score} Description'] = criterion_paras[f'score {score}']
         prompt = self.__generate_prompt(CRITERIA_BASED_JUDGING_PROMPT, content_paras)
         self.input_token_usage += self.token_counter.num_tokens_from_string(prompt)
         scores = self.api_model.chat(prompt, temperature=0),
@@ -189,18 +190,23 @@ class Judge():
                     sources_ids.append(list(source_ids))
 
 
+        if not claims:
+            return 0.0, 0.0
+
         paper_infos = self.db.get_paper_info_from_ids(list(references.values()))
 
         ids_to_title = {p['id']:p['title'] for p in paper_infos}
         ids_to_paper = {p['id']:p['abs'] for p in paper_infos}
 
-        index_to_paper = {int(index): ids_to_paper[idx] for index, idx in references.items()}
-        index_to_titles = {int(index): ids_to_title[idx] for index, idx in references.items()}
+        index_to_paper = {int(index): ids_to_paper[idx] for index, idx in references.items() if idx in ids_to_paper}
+        index_to_titles = {int(index): ids_to_title[idx] for index, idx in references.items() if idx in ids_to_title}
 
         thread_l = []
         scores = [0] * len(claims)
         for i in range(len(claims)):
-            sources = [index_to_paper[index] for index in sources_ids[i]]
+            sources = [index_to_paper[index] for index in sources_ids[i] if index in index_to_paper]
+            if not sources:
+                continue
             thread = threading.Thread(target=self.__nli, args=(sources, claims[i], scores, i))
             thread_l.append(thread)
             thread.start()
@@ -210,11 +216,12 @@ class Judge():
         thread_l = []
         precisions = [0] * len(claims)
         for j, claim, source_ids in zip(range(len(claims)), claims, sources_ids):
-            citation_num += len(source_ids)
+            valid_source_ids = [index for index in source_ids if index in index_to_paper]
+            citation_num += len(valid_source_ids)
             if scores[j] == 1:
-                for index in source_ids:
+                for index in valid_source_ids:
                     sources = [index_to_paper[index]]
-                    com_sources = [index_to_paper[_] for _ in source_ids if not _ == index]
+                    com_sources = [index_to_paper[_] for _ in valid_source_ids if not _ == index]
                     thread = threading.Thread(target=self.__relevant, args=(sources, com_sources, claim, precisions, j))
                     thread_l.append(thread)
                     thread.start()
@@ -223,4 +230,5 @@ class Judge():
 
         precisions = np.array(precisions)
 
-        return np.array(scores).mean(), precisions.sum()/citation_num
+        precision_value = precisions.sum()/citation_num if citation_num > 0 else 0.0
+        return np.array(scores).mean(), precision_value

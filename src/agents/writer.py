@@ -1,8 +1,10 @@
+import copy
+import json
 import math
+import os
 import re
 import threading
 import time
-import copy
 from collections import Counter
 
 from src.model import APIModel
@@ -26,6 +28,95 @@ class subsectionWriter():
         self.db = database
         self.token_counter = tokenCounter()
         self.input_token_usage, self.output_token_usage = 0, 0
+
+    def clean_model_text(self, text, strip_tables=False):
+        cleaned = (text or "").replace('<format>', '').replace('</format>', '').strip()
+        cleaned = re.sub(r'^\s*```(?:markdown|md)?\s*\n', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\n```+\s*$', '', cleaned)
+        cleaned = cleaned.strip()
+        if strip_tables:
+            cleaned = self.remove_markdown_tables(cleaned)
+        return cleaned
+
+    def count_citation_spans(self, text):
+        span_count = 0
+        for match in re.finditer(r'\[([^\]]+)\]', text or ''):
+            bracket = match.group(1).strip()
+            if not bracket or bracket == 'Mechanism Diagram':
+                continue
+            span_count += 1
+        return span_count
+
+    def citation_stats(self, text):
+        title_counts = self.collect_citation_titles(text)
+        return {
+            "span_count": self.count_citation_spans(text),
+            "unique_title_count": len(title_counts),
+            "max_repeat": max(title_counts.values()) if title_counts else 0,
+            "title_counts": title_counts,
+        }
+
+    def _normalize_title(self, title):
+        if hasattr(self.db, '_normalize_title'):
+            return self.db._normalize_title(title)
+        title = str(title or "").lower().strip()
+        title = re.sub(r'\s+', ' ', title)
+        return title
+
+    def collect_cited_ids(self, section_content, title_map):
+        normalized_title_to_id = {}
+        for pid, title in title_map.items():
+            norm_title = self._normalize_title(title)
+            if norm_title and norm_title not in normalized_title_to_id:
+                normalized_title_to_id[norm_title] = pid
+
+        cited_id_counts = Counter()
+        for subsections in section_content:
+            for subsection_text in subsections:
+                for title, count in self.collect_citation_titles(subsection_text).items():
+                    pid = normalized_title_to_id.get(self._normalize_title(title))
+                    if pid:
+                        cited_id_counts[pid] += count
+        return cited_id_counts
+
+    def build_priority_title_list(self, reference_ids, title_map, max_titles=12):
+        titles = []
+        for pid in reference_ids:
+            title = title_map.get(pid)
+            if title and title not in titles:
+                titles.append(title)
+            if len(titles) >= max_titles:
+                break
+        return "\n".join(titles) if titles else "None"
+
+    def write_runtime_checkpoint(self, topic, saving_path, stage, survey_text="", references=None, extra=None):
+        if not saving_path:
+            return
+
+        os.makedirs(saving_path, exist_ok=True)
+        preview_path = os.path.join(saving_path, "_running_preview.md")
+        status_path = os.path.join(saving_path, "_running_status.json")
+
+        if survey_text:
+            with open(preview_path, "w", encoding="utf-8") as f:
+                f.write(survey_text.strip() + "\n")
+
+        payload = {
+            "topic": topic,
+            "stage": stage,
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+        }
+        if references is not None:
+            payload["reference_count"] = len(references)
+        if survey_text:
+            stats = self.citation_stats(survey_text.split("## References")[0])
+            payload["citation_spans"] = stats["span_count"]
+            payload["unique_citation_titles"] = stats["unique_title_count"]
+        if extra:
+            payload.update(extra)
+
+        with open(status_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
 
     def compute_subsection_reference_plan(self, subsection_descriptions, allowed_ids, rag_num, global_used_ids=None):
         candidate_pool = list(allowed_ids) if allowed_ids else []
@@ -73,6 +164,8 @@ class subsectionWriter():
     def write(self, topic, outline, rag_num=30, subsection_len=500, refining=True, reflection=True, saving_path="./output/", illustrator_agent=None, rag_context=None):
         parsed_outline = self.parse_outline(outline=outline)
         section_content = [[] for _ in range(len(parsed_outline['sections']))]
+
+        print(f"[*] Writing survey body for {len(parsed_outline['sections'])} sections...")
 
         section_paper_texts = [[] for _ in range(len(parsed_outline['sections']))]
         total_ids = []
@@ -141,10 +234,30 @@ class subsectionWriter():
         section_content = self.strip_uncontrolled_tables_from_sections(section_content)
         raw_survey = self.generate_document(parsed_outline, section_content)
         raw_survey_with_references, raw_references = self.process_references(raw_survey)
+        self.write_runtime_checkpoint(
+            topic,
+            saving_path,
+            "raw_draft_ready",
+            raw_survey_with_references,
+            raw_references,
+            extra={"section_count": len(parsed_outline['sections'])},
+        )
 
         if refining:
+            print("[*] Refining subsection coherence...")
             final_section_content = self.refine_subsections(topic, outline, section_content)
             final_section_content = self.strip_uncontrolled_tables_from_sections(final_section_content)
+            refined_stage_survey = self.generate_document(parsed_outline, final_section_content)
+            refined_stage_with_refs, refined_stage_refs = self.process_references(refined_stage_survey)
+            self.write_runtime_checkpoint(
+                topic,
+                saving_path,
+                "coherence_refined",
+                refined_stage_with_refs,
+                refined_stage_refs,
+            )
+
+            print("[*] Rebalancing subsection citations...")
             final_section_content = self.rebalance_citations_after_refinement(
                 topic,
                 parsed_outline,
@@ -155,6 +268,17 @@ class subsectionWriter():
                 section_citation_targets,
                 section_unique_paper_targets,
             )
+            rebalanced_survey = self.generate_document(parsed_outline, final_section_content)
+            rebalanced_with_refs, rebalanced_refs = self.process_references(rebalanced_survey)
+            self.write_runtime_checkpoint(
+                topic,
+                saving_path,
+                "citation_rebalanced",
+                rebalanced_with_refs,
+                rebalanced_refs,
+            )
+
+            print("[*] Expanding citations only for weak subsections...")
             final_section_content = self.expand_global_citation_coverage(
                 topic,
                 parsed_outline,
@@ -162,14 +286,28 @@ class subsectionWriter():
                 section_references_ids,
                 temp_title_dic,
                 temp_abs_dic,
+                section_citation_targets,
+                section_unique_paper_targets,
             )
+
+            print("[*] Inserting controlled survey tables...")
             final_section_content = self.insert_section_tables(
                 topic,
                 parsed_outline,
                 final_section_content,
                 section_paper_texts,
             )
+            table_ready_survey = self.generate_document(parsed_outline, final_section_content)
+            table_ready_with_refs, table_ready_refs = self.process_references(table_ready_survey)
+            self.write_runtime_checkpoint(
+                topic,
+                saving_path,
+                "tables_inserted",
+                table_ready_with_refs,
+                table_ready_refs,
+            )
             if illustrator_agent:
+                print("[*] Generating and benchmarking figures...")
                 final_section_content = illustrator_agent.enrich_sections_with_diagrams(
                     topic,
                     parsed_outline,
@@ -178,6 +316,13 @@ class subsectionWriter():
                 )
             refined_survey = self.generate_document(parsed_outline, final_section_content)
             refined_survey_with_references, refined_references = self.process_references(refined_survey)
+            self.write_runtime_checkpoint(
+                topic,
+                saving_path,
+                "final_refined",
+                refined_survey_with_references,
+                refined_references,
+            )
             return (
                 raw_survey + '\n',
                 raw_survey_with_references + '\n',
@@ -494,7 +639,7 @@ or
         contents = self.api_model.batch_chat(prompts, temperature=1)
         self.output_token_usage += self.token_counter.num_tokens_from_list_string(contents)
         contents = [
-            self.remove_markdown_tables(c.replace('<format>', '').replace('</format>', ''))
+            self.clean_model_text(c, strip_tables=True)
             for c in contents
         ]
 
@@ -522,7 +667,7 @@ or
         contents = self.api_model.batch_chat(enrich_prompts, temperature=0.3)
         self.output_token_usage += self.token_counter.num_tokens_from_list_string(contents)
         contents = [
-            self.remove_markdown_tables(c.replace('<format>', '').replace('</format>', ''))
+            self.clean_model_text(c, strip_tables=True)
             for c in contents
         ]
 
@@ -538,7 +683,7 @@ or
         contents = self.api_model.batch_chat(prompts, temperature=1)
         self.output_token_usage += self.token_counter.num_tokens_from_list_string(contents)
         contents = [
-            self.remove_markdown_tables(c.replace('<format>', '').replace('</format>', ''))
+            self.clean_model_text(c, strip_tables=True)
             for c in contents
         ]
 
@@ -697,35 +842,88 @@ or
         section_references_ids,
         title_map,
         abs_map,
+        section_citation_targets,
+        section_unique_paper_targets,
     ):
         prompts = []
         prompt_meta = []
         validation_prompts = []
+        global_cited_ids = self.collect_cited_ids(section_content, title_map)
+        all_reference_ids = []
+        for section_ids in section_references_ids:
+            for subsection_ids in section_ids:
+                for pid in subsection_ids:
+                    if pid not in all_reference_ids:
+                        all_reference_ids.append(pid)
 
+        globally_underused_ids = [pid for pid in all_reference_ids if global_cited_ids.get(pid, 0) == 0]
+
+        weak_targets = []
         for i, section_name in enumerate(parsed_outline['sections']):
-            section_ids = self.flatten_unique_ids(section_references_ids[i])
             subsection_titles = parsed_outline['subsections'][i]
             subsection_descriptions = parsed_outline['subsection_descriptions'][i]
             for j, subsection_text in enumerate(section_content[i]):
-                description = subsection_descriptions[j] if j < len(subsection_descriptions) else subsection_titles[j]
-                expanded_ids = self.select_rebalance_reference_ids(
-                    f"{topic}. {section_name}. {subsection_titles[j]}. {description}",
-                    section_references_ids[i][j],
-                    section_ids,
-                    max_refs=max(72, min(110, len(section_ids))),
+                stats = self.citation_stats(subsection_text)
+                citation_target = section_citation_targets[i][j] if j < len(section_citation_targets[i]) else 10
+                unique_target = section_unique_paper_targets[i][j] if j < len(section_unique_paper_targets[i]) else 12
+                citation_gap = max(0, citation_target - stats["span_count"])
+                unique_gap = max(0, unique_target - stats["unique_title_count"])
+                repeated_penalty = max(0, stats["max_repeat"] - 3)
+                if citation_gap <= 1 and unique_gap <= 2 and repeated_penalty <= 1:
+                    continue
+                weak_targets.append(
+                    (
+                        citation_gap * 3 + unique_gap * 2 + repeated_penalty,
+                        i,
+                        j,
+                        subsection_titles[j],
+                        subsection_descriptions[j] if j < len(subsection_descriptions) else subsection_titles[j],
+                        stats,
+                    )
                 )
-                paper_text = self.build_paper_text(expanded_ids, title_map, abs_map, max_papers=96, max_abs_chars=1000)
-                prompt = self.__generate_prompt(
-                    GLOBAL_CITATION_EXPANSION_PROMPT,
-                    paras={
-                        'TOPIC': topic,
-                        'PAPER LIST': paper_text,
-                        'SUBSECTION': subsection_text,
-                        'DESCRIPTION': description,
-                    },
-                )
-                prompts.append(prompt)
-                prompt_meta.append((i, j, paper_text))
+
+        if not weak_targets:
+            return section_content
+
+        weak_targets = sorted(weak_targets, reverse=True)
+        max_targets = max(8, min(16, len(weak_targets)))
+        weak_targets = weak_targets[:max_targets]
+
+        for _, i, j, subsection_title, description, stats in weak_targets:
+            section_name = parsed_outline['sections'][i]
+            subsection_text = section_content[i][j]
+            section_ids = self.flatten_unique_ids(section_references_ids[i])
+            local_ids = list(section_references_ids[i][j])
+            expansion_seed_ids = []
+            for pid in globally_underused_ids:
+                if pid in section_ids and pid not in expansion_seed_ids:
+                    expansion_seed_ids.append(pid)
+                if len(expansion_seed_ids) >= 18:
+                    break
+
+            expanded_ids = self.select_rebalance_reference_ids(
+                f"{topic}. {section_name}. {subsection_title}. {description}",
+                local_ids + expansion_seed_ids,
+                section_ids,
+                max_refs=max(64, min(88, len(section_ids))),
+            )
+            paper_text = self.build_paper_text(expanded_ids, title_map, abs_map, max_papers=56, max_abs_chars=720)
+            prompt = self.__generate_prompt(
+                GLOBAL_CITATION_EXPANSION_PROMPT,
+                paras={
+                    'TOPIC': topic,
+                    'PAPER LIST': paper_text,
+                    'SUBSECTION': subsection_text,
+                    'DESCRIPTION': description,
+                    'CURRENT CITATION NUM': str(stats["span_count"]),
+                    'CURRENT UNIQUE CITATION NUM': str(stats["unique_title_count"]),
+                    'TARGET CITATION NUM': str(section_citation_targets[i][j] + 3 if j < len(section_citation_targets[i]) else 13),
+                    'TARGET UNIQUE CITATION NUM': str(section_unique_paper_targets[i][j] + 3 if j < len(section_unique_paper_targets[i]) else 15),
+                    'PRIORITY PAPERS': self.build_priority_title_list(expansion_seed_ids, title_map, max_titles=10),
+                },
+            )
+            prompts.append(prompt)
+            prompt_meta.append((i, j, paper_text))
 
         if not prompts:
             return section_content
@@ -734,7 +932,7 @@ or
         revised_contents = self.api_model.batch_chat(prompts, temperature=0.2)
         self.output_token_usage += self.token_counter.num_tokens_from_list_string(revised_contents)
         cleaned_contents = [
-            self.remove_markdown_tables(c.replace('<format>', '').replace('</format>', ''))
+            self.clean_model_text(c, strip_tables=True)
             for c in revised_contents
         ]
 
@@ -750,7 +948,7 @@ or
         validated_contents = self.api_model.batch_chat(validation_prompts, temperature=0.55)
         self.output_token_usage += self.token_counter.num_tokens_from_list_string(validated_contents)
         validated_contents = [
-            self.remove_markdown_tables(c.replace('<format>', '').replace('</format>', ''))
+            self.clean_model_text(c, strip_tables=True)
             for c in validated_contents
         ]
 
@@ -776,7 +974,7 @@ or
             },
         )
         self.input_token_usage += self.token_counter.num_tokens_from_string(prompt)
-        refined_content = self.api_model.chat(prompt, temperature=1).replace('<format>', '').replace('</format>', '')
+        refined_content = self.clean_model_text(self.api_model.chat(prompt, temperature=1), strip_tables=False)
         self.output_token_usage += self.token_counter.num_tokens_from_string(refined_content)
         res_l[idx] = refined_content
         return refined_content.replace('Here is the refined subsection:\n', '')

@@ -17,6 +17,7 @@ class IllustratorAgent:
         self.image_model = image_model
         self.api_url = api_model._APIModel__api_url 
         self.image_api_url = image_api_url.strip() if image_api_url else self._infer_image_api_url()
+        self.image_api_url_candidates = self._build_image_api_candidates(self.image_api_url)
         self.benchmark_agent = benchmark_agent
         self.image_timeout = 120
         self.max_image_retries = 3
@@ -222,6 +223,21 @@ Candidates:
             return "https://api.openai.com/v1/images/generations"
         return self.api_url
 
+    def _build_image_api_candidates(self, primary_url):
+        candidates = []
+
+        def add(url):
+            if url and url not in candidates:
+                candidates.append(url)
+
+        add(primary_url)
+        if self.api_url.endswith("/v1/chat/completions"):
+            add(self.api_url.replace("/v1/chat/completions", "/v1/images/generations"))
+        if self.image_model.startswith("gpt-image-"):
+            add("https://yunwu.ai/v1/images/generations")
+            add("https://api.openai.com/v1/images/generations")
+        return candidates
+
     def _save_image_bytes(self, img_data, save_path):
         with open(save_path, "wb") as f:
             f.write(img_data)
@@ -263,19 +279,28 @@ Candidates:
                     "prompt": prompt,
                     "size": size,
                 }
-                response = requests.post(self.image_api_url, headers=headers, json=payload, timeout=self.image_timeout)
-                response.raise_for_status()
-                data = response.json()
-                if data.get("data"):
-                    item = data["data"][0]
-                    if item.get("b64_json"):
-                        img_data = base64.b64decode(item["b64_json"])
-                        return self._save_image_bytes(img_data, save_path), None
-                    if item.get("url"):
-                        img_res = requests.get(item["url"], timeout=30)
-                        img_res.raise_for_status()
-                        return self._save_image_bytes(img_res.content, save_path), None
-                return False, "No image payload found in OpenAI image response."
+                last_error = None
+                for endpoint in self.image_api_url_candidates:
+                    try:
+                        response = requests.post(endpoint, headers=headers, json=payload, timeout=self.image_timeout)
+                        response.raise_for_status()
+                        data = response.json()
+                        if data.get("data"):
+                            item = data["data"][0]
+                            if item.get("b64_json"):
+                                img_data = base64.b64decode(item["b64_json"])
+                                self.image_api_url = endpoint
+                                return self._save_image_bytes(img_data, save_path), None
+                            if item.get("url"):
+                                img_res = requests.get(item["url"], timeout=30)
+                                img_res.raise_for_status()
+                                self.image_api_url = endpoint
+                                return self._save_image_bytes(img_res.content, save_path), None
+                        last_error = f"No image payload found in response from {endpoint}."
+                    except Exception as endpoint_error:
+                        last_error = f"{endpoint} :: {endpoint_error}"
+                        continue
+                return False, last_error or "No image payload found in image response."
 
             payload = {
                 "model": self.image_model,

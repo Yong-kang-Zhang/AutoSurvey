@@ -35,7 +35,7 @@ def map_five_to_hundred(score):
     try:
         return float(score) * 20.0
     except Exception:
-        return score
+        return None
 
 def evaluate(args):
 
@@ -69,7 +69,10 @@ def evaluate(args):
         result = f'Judged by {args.model}:\n'
         for c, s in zip(criterion, scores):
             mapped = map_five_to_hundred(s)
-            result += f'{c} = {mapped:.1f} ({float(s):.1f}/5.0)\n'
+            if mapped is None:
+                result += f'{c} = N/A\n'
+            else:
+                result += f'{c} = {mapped:.1f} ({float(s):.1f}/5.0)\n'
         result += f'Citation Recall = {recall:.4f}\nCitation Precision = {precision:.4f}\n'
         if image_benchmark_score is not None:
             result += f'Image Benchmark Score = {image_benchmark_score:.2f}\n'
